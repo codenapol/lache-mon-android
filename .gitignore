@@ -1,0 +1,31 @@
+# Exécutable compilé
+lache_mon_android
+
+# Fichiers de compilation
+*.o
+*.d
+*.a
+*.so
+*.out
+
+# Fichiers temporaires (téléchargements interrompus, éditeurs)
+*.tmp
+*.nouveau
+*~
+*.swp
+.*.swp
+
+# Éditeurs / IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# Système
+.DS_Store
+Thumbs.db
+
+# Paramètres locaux de Claude Code
+.claude/settings.local.json
+
+# Logo source : contient des métadonnées d'identification (générateur d'images)
+logo.jpg
