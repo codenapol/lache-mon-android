@@ -1,0 +1,41 @@
+name: Compilation
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Compilation Linux
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Récupérer le code et ImGui
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Installer les dépendances
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libsdl2-dev libgl-dev libssl-dev
+
+      - name: Compiler (les warnings sont des erreurs)
+        run: make -j"$(nproc)" CXX="g++ -Werror"
+
+      - name: Vérifier le binaire
+        run: test -x lache_mon_android
+
+      - name: Garder le binaire
+        uses: actions/upload-artifact@v7
+        with:
+          name: lache_mon_android-linux-x86_64
+          path: |
+            lache_mon_android
+            logo.bmp
+            photo de telephone/
