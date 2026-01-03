@@ -548,7 +548,9 @@ bool mettre_a_jour(std::string& message)
     // Date du jour (JJ/MM/AAAA)
     char date[16];
     const std::time_t maintenant = std::time(nullptr);
-    std::strftime(date, sizeof(date), "%d/%m/%Y", std::localtime(&maintenant));
+    std::tm tm_local{};
+    localtime_r(&maintenant, &tm_local);
+    std::strftime(date, sizeof(date), "%d/%m/%Y", &tm_local);
     std::ofstream(dossier / "derniere_maj", std::ios::trunc) << date << '\n';
 
     message = std::to_string(reussies) + "/" + std::to_string(total) + " collections téléchargées.";
