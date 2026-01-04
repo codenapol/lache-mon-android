@@ -12,6 +12,7 @@
 
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_opengl.h>
+#include <SDL2/SDL_image.h>
 
 #include "imgui.h"
 #include "imgui_impl_sdl2.h"
@@ -21,12 +22,16 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cstdio>
+#include <map>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <thread>
 #include <vector>
 
+#include "alternatives.h" // alternatives libres : catalogue, version et logo
 #include "outils.h"   // executer, nettoyer, paquet_valide
 #include "securite.h" // détection de logiciels espions
 #include "uad.h"      // liste de debloat UAD-ng
@@ -143,6 +148,51 @@ const AppConnue LISTE_PROBLEMATIQUES[] = {
     {"com.einnovation.temu",                     "Temu"},
     {"com.zzkko",                                "Shein"},
     {"com.alibaba.aliexpresshd",                 "AliExpress"},
+
+    // Meta (autres applis)
+    {"com.instagram.lite",                       "Instagram Lite"},
+    {"com.facebook.talk",                        "Messenger Kids"},
+
+    // ByteDance / vidéo courte (collecte massive, transferts hors UE)
+    {"com.zhiliaoapp.musically.go",              "TikTok Lite"},
+    {"com.ss.android.ugc.aweme",                 "Douyin"},
+    {"com.lemon.lvoverseas",                     "CapCut"},
+    {"com.kwai.video",                           "Kwai"},
+    {"video.like",                               "Likee"},
+    {"sg.bigo.live",                             "BIGO LIVE"},
+
+    // Réseaux sociaux / messageries
+    {"com.tencent.mm",                           "WeChat"},
+    {"com.vkontakte.android",                    "VK"},
+    {"com.discord",                              "Discord"},
+
+    // Rencontres (données sensibles partagées avec des régies publicitaires)
+    {"com.tinder",                               "Tinder"},
+    {"com.bumble.app",                           "Bumble"},
+    {"com.badoo.mobile",                         "Badoo"},
+    {"com.grindrapp.android",                    "Grindr"},
+
+    // Annuaire / identification d'appel (envoie le carnet de contacts)
+    {"com.truecaller",                           "Truecaller"},
+
+    // Localisation revendue à des courtiers en données
+    {"com.life360.android.safetymapd",           "Life360"},
+    {"com.weather.Weather",                      "The Weather Channel"},
+    {"com.accuweather.android",                  "AccuWeather"},
+
+    // "Nettoyeurs", navigateurs et outils connus pour pistage ou failles
+    {"com.cleanmaster.mguard",                   "Clean Master"},
+    {"com.cleanmaster.security",                 "CM Security"},
+    {"com.lenovo.anyshare.gps",                  "SHAREit"},
+    {"com.estrongs.android.pop",                 "ES Explorateur de fichiers"},
+    {"com.UCMobile.intl",                        "UC Browser"},
+    {"com.opera.mini.native",                    "Opera Mini"},
+    {"com.yandex.browser",                       "Yandex Browser"},
+
+    // Shopping (pistage publicitaire agressif)
+    {"com.contextlogic.wish",                    "Wish"},
+    {"com.alibaba.intl.android.apps.poseidon",   "Alibaba.com"},
+    {"com.amazon.venezia",                       "Amazon Appstore"},
 };
 
 // Applications qui ont une alternative libre / respectueuse de la vie privée (bouton "Remplacer")
@@ -162,18 +212,31 @@ const AppConnue LISTE_ALTERNATIVES[] = {
     {"com.whatsapp.w4b",                    "Signal"},
     {"com.facebook.orca",                   "Signal"},
     {"com.facebook.mlite",                  "Signal"},
-    {"com.instagram.android",               "Pixelfed"},
+    {"com.instagram.android",               "PixelDroid"},
     {"com.twitter.android",                 "Mastodon"},
     {"com.instagram.barcelona",             "Mastodon"},
     {"com.amazon.kindle",                   "KOReader"},
+    {"com.tencent.mm",                      "Signal"},
+    {"com.facebook.katana",                 "Fedilab"},
+    {"com.facebook.lite",                   "Fedilab"},
+    {"com.instagram.lite",                  "PixelDroid"},
+    {"com.truecaller",                      "Fossify Phone"},
+    {"com.weather.Weather",                 "Breezy Weather"},
+    {"com.accuweather.android",             "Breezy Weather"},
+    {"com.estrongs.android.pop",            "Fossify File Manager"},
+    {"com.lenovo.anyshare.gps",             "LocalSend"},
+    {"com.UCMobile.intl",                   "IronFox"},
+    {"com.opera.mini.native",               "IronFox"},
+    {"com.yandex.browser",                  "IronFox"},
+    {"com.lemon.lvoverseas",                "Open Video Editor"},
 };
 
-// Renvoie l'alternative d'un paquet, ou "" s'il n'y en a pas
+// Renvoie l'alternative d'un paquet, ou "" s'il n'y en a pas (ou si elle n'a pas de fiche)
 std::string alternative_de(const std::string& paquet)
 {
     for (const AppConnue& alt : LISTE_ALTERNATIVES)
         if (paquet == alt.paquet)
-            return alt.nom;
+            return fiche_alternative(alt.nom) ? alt.nom : "";
     return "";
 }
 
@@ -195,6 +258,15 @@ struct AppTrouvee
     std::string description; // description UAD-ng (en anglais), vide si inconnue
     std::string requis_par;  // paquets qui en dépendent (UAD-ng), séparés par des virgules
 };
+
+// Premier client F-Droid installé et activé parmi `actifs`, ou "" s'il n'y en a pas
+std::string client_fdroid(const std::set<std::string>& actifs)
+{
+    for (const std::string& client : CLIENTS_FDROID)
+        if (actifs.count(client))
+            return client;
+    return "";
+}
 
 // Nom lisible tiré de la 1re ligne de la description UAD-ng ("Files by Google (https://...)"),
 // seulement si elle ressemble à un nom et pas à une phrase
@@ -238,6 +310,8 @@ struct InfosAppareil
     std::vector<AppTrouvee> problematiques;
     std::vector<AppTrouvee> desactivees;
     std::vector<AppTrouvee> desinstallees;
+    std::set<std::string> actifs; // paquets installés et activés (fenêtre « Remplacer »)
+    std::string client_fdroid;    // client F-Droid installé ("" si aucun)
     RapportSecurite securite; // logiciels espions, accès sensibles, réglages affaiblis
     std::string erreur; // vide si tout s'est bien passé
 };
@@ -307,6 +381,8 @@ InfosAppareil detection_info(const std::string& cible)
     std::set<std::string> actifs    = lister_paquets(adb + "shell pm list packages -e");  // installés + activés
     std::set<std::string> desactives= lister_paquets(adb + "shell pm list packages -d");  // installés + désactivés
     std::set<std::string> tous      = lister_paquets(adb + "shell pm list packages -u");  // + désinstallés
+    infos.actifs        = actifs;
+    infos.client_fdroid = client_fdroid(actifs);
 
     // Bloatwares et applis problématiques : seulement celles encore actives
     std::set<std::string> deja_classees;
@@ -363,7 +439,7 @@ InfosAppareil detection_info(const std::string& cible)
 }
 
 // Action demandée par un clic dans une liste
-enum TypeAction { AUCUNE, DESACTIVER, DESINSTALLER, REACTIVER, REINSTALLER };
+enum TypeAction { AUCUNE, DESACTIVER, DESINSTALLER, REACTIVER, REINSTALLER, REMPLACER };
 struct Action
 {
     TypeAction type = AUCUNE;
@@ -466,9 +542,7 @@ void afficher_liste_apps(const char* id, const std::vector<AppTrouvee>& apps, Ac
             if (!app.alternative.empty())
             {
                 if (petit_bouton("Remplacer", -FLT_MIN))
-                {
-                    // TODO : remplacer app.paquet par app.alternative
-                }
+                    action = {REMPLACER, app.paquet, app.nom};
                 ImGui::SetItemTooltip("par %s", app.alternative.c_str());
             }
 
@@ -744,32 +818,81 @@ struct Photo
     int l = 0, h = 0;
 };
 
-// Charge un BMP 32 bits en texture OpenGL (texture = 0 si échec)
-Photo charger_photo(const std::string& chemin)
+// Crée une texture OpenGL à partir de pixels RGBA (`pixels_par_ligne` : largeur réelle d'une ligne en mémoire)
+Photo texture_rgba(const void* pixels, int l, int h, int pixels_par_ligne)
 {
     Photo photo;
-    SDL_Surface* brute = SDL_LoadBMP(chemin.c_str());
-    if (!brute)
-    {
-        std::cerr << "Image introuvable : " << chemin << std::endl;
-        return photo;
-    }
-    SDL_Surface* rgba = SDL_ConvertSurfaceFormat(brute, SDL_PIXELFORMAT_ABGR8888, 0);
-    SDL_FreeSurface(brute);
-    if (!rgba)
-        return photo;
-
-    photo.l = rgba->w;
-    photo.h = rgba->h;
+    photo.l = l;
+    photo.h = h;
     glGenTextures(1, &photo.texture);
     glBindTexture(GL_TEXTURE_2D, photo.texture);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glPixelStorei(GL_UNPACK_ROW_LENGTH, rgba->pitch / 4);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, photo.l, photo.h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba->pixels);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, pixels_par_ligne);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, l, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
     glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    return photo;
+}
+
+// Charge un BMP 32 bits en texture OpenGL (texture = 0 si échec)
+Photo charger_photo(const std::string& chemin)
+{
+    SDL_Surface* brute = SDL_LoadBMP(chemin.c_str());
+    if (!brute)
+    {
+        std::cerr << "Image introuvable : " << chemin << std::endl;
+        return Photo();
+    }
+    SDL_Surface* rgba = SDL_ConvertSurfaceFormat(brute, SDL_PIXELFORMAT_ABGR8888, 0);
+    SDL_FreeSurface(brute);
+    if (!rgba)
+        return Photo();
+
+    const Photo photo = texture_rgba(rgba->pixels, rgba->w, rgba->h, rgba->pitch / 4);
     SDL_FreeSurface(rgba);
     return photo;
+}
+
+// ================== Fenêtre « Remplacer » ==================
+
+// Recherche de version et de logo lancée dans un thread : `infos` n'est lu qu'une fois `finie` à true
+struct RechercheAlternative
+{
+    std::atomic<bool> finie{false};
+    InfosAlternative infos;
+};
+
+// Logo carré : celui de l'appli s'il est chargé, sinon la première lettre du nom sur fond gris
+void logo_alternative(const Photo& logo, const char* nom, float taille)
+{
+    if (logo.texture)
+    {
+        ImGui::Image((ImTextureID)(intptr_t)logo.texture, ImVec2(taille, taille));
+        return;
+    }
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    ImGui::Dummy(ImVec2(taille, taille));
+    ImDrawList* dessin = ImGui::GetWindowDrawList();
+    dessin->AddRectFilled(p, ImVec2(p.x + taille, p.y + taille),
+                          ImGui::GetColorU32(ImGuiCol_FrameBg), taille * 0.22f);
+    const char lettre[2] = {nom[0], 0};
+    const float echelle = 2.0f;
+    const ImVec2 t = ImGui::CalcTextSize(lettre);
+    dessin->AddText(ImGui::GetFont(), ImGui::GetFontSize() * echelle,
+                    ImVec2(p.x + (taille - t.x * echelle) * 0.5f, p.y + (taille - t.y * echelle) * 0.5f),
+                    ImGui::GetColorU32(ImGuiCol_TextDisabled), lettre);
+}
+
+// Lance une commande "am start ..." sur le téléphone. Renvoie "" si tout va bien, sinon la sortie d'erreur.
+std::string commande_telephone(const std::string& cible, const std::string& commande_shell)
+{
+    const std::string sortie = nettoyer(executer("adb -s " + cible + " shell \"" + commande_shell + "\""));
+    std::clog << "[REMPLACER] " << commande_shell << " -> " << sortie << std::endl;
+    const bool echec = sortie.find("Error")          != std::string::npos ||
+                       sortie.find("Exception")      != std::string::npos ||
+                       sortie.find("No activities")  != std::string::npos ||
+                       sortie.find("monkey aborted") != std::string::npos;
+    return echec ? sortie : "";
 }
 
 int main()
@@ -793,6 +916,61 @@ int main()
     std::thread      travail;
     std::atomic<bool> action_en_cours{false};
     Action           a_confirmer;     // désinstallation en attente de confirmation
+
+    // Fenêtre « Remplacer »
+    Action            a_remplacer;      // appli à remplacer (paquet + nom)
+    std::map<std::string, std::shared_ptr<RechercheAlternative>> recherches; // par paquet d'alternative
+    std::vector<std::thread> threads_recherche; // recherches de version et de logo (attendues à la fermeture)
+    std::map<std::string, Photo> logos;        // logos déjà chargés, par paquet d'alternative
+    std::thread       thread_telephone;        // commandes "am start" (ouvrir F-Droid, une page, une appli)
+    std::atomic<bool> telephone_en_cours{false};
+    std::string       message_remplacer;       // résultat de la dernière commande (protégé par verrou)
+    std::thread       thread_suivi;            // surveille les installations pendant que la fenêtre est ouverte
+    std::atomic<bool> suivi_actif{false};
+
+    // Relit les paquets actifs toutes les 2 s : la fenêtre voit apparaître F-Droid ou l'alternative
+    // dès que l'utilisateur les installe sur le téléphone
+    auto demarrer_suivi = [&](const std::string& cible)
+    {
+        if (thread_suivi.joinable())
+            thread_suivi.join();
+        suivi_actif = true;
+        thread_suivi = std::thread([&, cible]()
+        {
+            while (suivi_actif)
+            {
+                std::set<std::string> actifs = lister_paquets("adb -s " + cible + " shell pm list packages -e");
+                if (!actifs.empty() && suivi_actif)
+                {
+                    std::lock_guard<std::mutex> garde(verrou);
+                    infos.client_fdroid = client_fdroid(actifs);
+                    infos.actifs        = std::move(actifs);
+                }
+                for (int i = 0; i < 20 && suivi_actif; ++i)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        });
+    };
+
+    // Exécute une commande sur le téléphone sans figer la fenêtre ; `succes` s'affiche si elle réussit
+    auto lancer_sur_telephone = [&](const std::string& cible, const std::string& commande_shell,
+                                    const std::string& succes)
+    {
+        if (telephone_en_cours)
+            return;
+        if (thread_telephone.joinable())
+            thread_telephone.join();
+        telephone_en_cours = true;
+        thread_telephone = std::thread([&, cible, commande_shell, succes]()
+        {
+            const std::string erreur = commande_telephone(cible, commande_shell);
+            {
+                std::lock_guard<std::mutex> garde(verrou);
+                message_remplacer = erreur.empty() ? succes : "Échec : " + erreur;
+            }
+            telephone_en_cours = false;
+        });
+    };
 
     // Base d'indicateurs de compromission (logiciels espions) et liste de debloat UAD-ng
     securite::charger_indicateurs();
@@ -843,6 +1021,15 @@ int main()
         std::cerr << "Erreur SDL : " << SDL_GetError() << std::endl;
         return 1;
     }
+
+    // Formats d'image des logos d'alternatives, chargés une fois ici (avant les threads qui les décodent).
+    // BMP, GIF, ICO et SVG sont toujours disponibles ; un format absent est simplement ignoré.
+    int formats_image = IMG_INIT_PNG | IMG_INIT_JPG | IMG_INIT_WEBP | IMG_INIT_TIF;
+#if SDL_IMAGE_VERSION_ATLEAST(2, 6, 0)
+    formats_image |= IMG_INIT_AVIF | IMG_INIT_JXL;
+#endif
+    if ((IMG_Init(formats_image) & (IMG_INIT_PNG | IMG_INIT_WEBP)) != (IMG_INIT_PNG | IMG_INIT_WEBP))
+        std::cerr << "SDL_image : PNG ou WebP indisponible (" << IMG_GetError() << ")" << std::endl;
 
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
@@ -1113,6 +1300,7 @@ int main()
             ImGui::BeginDisabled(occupe);
             if (ImGui::Button("Se déconnecter", ImVec2(-FLT_MIN, 0)))
             {
+                suivi_actif = false;
                 executer("adb disconnect " + cible);
                 {
                     std::lock_guard<std::mutex> garde(verrou);
@@ -1121,6 +1309,187 @@ int main()
                 etat = DECONNECTE;
             }
             ImGui::EndDisabled();
+
+            // ===== Fenêtre « Remplacer » : fiche de l'alternative, installation via F-Droid =====
+            if (action.type == REMPLACER)
+            {
+                a_remplacer = action;
+                action = Action();
+                if (const Alternative* alt = fiche_alternative(alternative_de(a_remplacer.paquet)))
+                {
+                    // Version et logo (relancé si la recherche précédente a échoué)
+                    std::shared_ptr<RechercheAlternative>& r = recherches[alt->paquet];
+                    if (!r || (r->finie && (!r->infos.trouve || r->infos.icone.empty())))
+                    {
+                        r = std::make_shared<RechercheAlternative>();
+                        threads_recherche.emplace_back([r, alt]()
+                        {
+                            r->infos = alternatives::chercher(*alt);
+                            r->finie = true;
+                        });
+                    }
+                    {
+                        std::lock_guard<std::mutex> garde(verrou);
+                        message_remplacer.clear();
+                    }
+                    demarrer_suivi(cible);
+                    ImGui::OpenPopup("Remplacer");
+                }
+            }
+            ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+            ImGui::SetNextWindowSize(ImVec2(480, 0));
+            bool fenetre_remplacer = false;
+            if (ImGui::BeginPopupModal("Remplacer", nullptr,
+                    ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
+            {
+                fenetre_remplacer = true;
+                const Alternative* alt = fiche_alternative(alternative_de(a_remplacer.paquet));
+                if (!alt) // ne devrait pas arriver : le bouton n'existe que pour les applis avec une fiche
+                {
+                    ImGui::CloseCurrentPopup();
+                    ImGui::EndPopup();
+                }
+                else
+                {
+                    // Recherche terminée : création du logo (une seule fois)
+                    const std::shared_ptr<RechercheAlternative> recherche = recherches[alt->paquet];
+                    const bool recherche_finie = recherche && recherche->finie;
+                    if (recherche_finie && !recherche->infos.icone.empty() && !logos.count(alt->paquet))
+                    {
+                        const InfosAlternative& f = recherche->infos;
+                        logos[alt->paquet] = texture_rgba(f.icone.data(), f.largeur, f.hauteur, f.largeur);
+                    }
+
+                    std::string message;
+                    bool alternative_installee, fdroid_installe;
+                    std::string client;
+                    {
+                        std::lock_guard<std::mutex> garde(verrou);
+                        message               = message_remplacer;
+                        alternative_installee = infos.actifs.count(alt->paquet) > 0;
+                        client                = infos.client_fdroid;
+                        fdroid_installe       = !client.empty();
+                    }
+
+                    // --- En-tête : logo, nom, version, description ---
+                    const float taille_logo = 64.0f;
+                    const auto logo = logos.find(alt->paquet);
+                    logo_alternative(logo != logos.end() ? logo->second : Photo(), alt->nom, taille_logo);
+                    ImGui::SameLine(0.0f, 16.0f);
+                    ImGui::BeginGroup();
+                    ImGui::SetWindowFontScale(1.35f);
+                    ImGui::TextUnformatted(alt->nom);
+                    ImGui::SetWindowFontScale(1.0f);
+                    const char* source = alt->page_officielle ? "site officiel" : "F-Droid";
+                    if (!recherche_finie)
+                        ImGui::TextDisabled("Recherche de la dernière version...");
+                    else if (recherche->infos.trouve)
+                        ImGui::TextDisabled("Version %s · %s", recherche->infos.version.c_str(), source);
+                    else
+                        ImGui::TextDisabled("Version inconnue (pas de connexion ?) · %s", source);
+                    ImGui::EndGroup();
+
+                    ImGui::PushTextWrapPos(0.0f);
+                    ImGui::TextUnformatted(alt->description);
+                    ImGui::TextDisabled("Pour remplacer %s", a_remplacer.nom.c_str());
+                    ImGui::PopTextWrapPos();
+
+                    ImGui::Dummy(ImVec2(0, 2));
+                    ImGui::Separator();
+
+                    // --- Étape 1 : installer l'alternative ---
+                    if (police_grasse) ImGui::PushFont(police_grasse);
+                    ImGui::Text("1. Installer %s", alt->nom);
+                    if (police_grasse) ImGui::PopFont();
+
+                    ImGui::PushTextWrapPos(0.0f);
+                    ImGui::BeginDisabled(telephone_en_cours);
+                    const std::string paquet_alt = alt->paquet;
+                    if (alternative_installee)
+                    {
+                        ImGui::TextColored(COULEUR_OK, "%s est installée sur le téléphone.", alt->nom);
+                        if (ImGui::Button("Ouvrir sur le téléphone", ImVec2(-FLT_MIN, 0)))
+                            lancer_sur_telephone(cible,
+                                "monkey -p " + paquet_alt + " -c android.intent.category.LAUNCHER 1",
+                                std::string(alt->nom) + " est ouverte sur le téléphone.");
+                    }
+                    else if (alt->page_officielle)
+                    {
+                        ImGui::TextDisabled("Cette appli n'est pas sur F-Droid : elle se télécharge "
+                                            "depuis son site officiel, qui s'ouvre sur le téléphone.");
+                        if (ImGui::Button("Ouvrir le site officiel", ImVec2(-FLT_MIN, 0)))
+                            lancer_sur_telephone(cible,
+                                "am start -a android.intent.action.VIEW -d '" + std::string(alt->page_officielle) + "'",
+                                "Site ouvert sur le téléphone.");
+                    }
+                    else if (fdroid_installe && paquet_valide(client))
+                    {
+                        if (ImGui::Button("Ouvrir dans F-Droid", ImVec2(-FLT_MIN, 0)))
+                            lancer_sur_telephone(cible,
+                                "am start -a android.intent.action.VIEW -d 'market://details?id=" + paquet_alt +
+                                "' -p " + client,
+                                "Fiche ouverte dans F-Droid : appuie sur « Installer » sur le téléphone.");
+                        ImGui::TextDisabled("F-Droid installe l'appli et la tient à jour.");
+                    }
+                    else
+                    {
+                        ImGui::TextColored(COULEUR_ALERTE, "F-Droid n'est pas installé.");
+                        ImGui::TextDisabled("F-Droid est le magasin d'applis libres : il installe %s "
+                                            "et la tient à jour.", alt->nom);
+                        if (ImGui::Button("Installer F-Droid", ImVec2(-FLT_MIN, 0)))
+                            lancer_sur_telephone(cible,
+                                "am start -a android.intent.action.VIEW -d '" + std::string(URL_APK_FDROID) + "'",
+                                "Téléchargement lancé : ouvre F-Droid.apk sur le téléphone et "
+                                "autorise l'installation si Android le demande.");
+                    }
+                    ImGui::EndDisabled();
+
+                    if (telephone_en_cours)
+                        ImGui::TextDisabled("En cours...");
+                    else if (!message.empty())
+                        ImGui::TextDisabled("%s", message.c_str());
+                    if (!alternative_installee)
+                        ImGui::TextDisabled("Cette fenêtre se met à jour dès que l'installation est faite.");
+                    ImGui::PopTextWrapPos();
+
+                    ImGui::Dummy(ImVec2(0, 2));
+                    ImGui::Separator();
+
+                    // --- Étape 2 : retirer l'appli d'origine ---
+                    if (police_grasse) ImGui::PushFont(police_grasse);
+                    ImGui::Text("2. Retirer %s", a_remplacer.nom.c_str());
+                    if (police_grasse) ImGui::PopFont();
+                    if (!alternative_installee)
+                    {
+                        ImGui::PushTextWrapPos(0.0f);
+                        ImGui::TextColored(COULEUR_ALERTE, "Installe d'abord %s pour ne pas rester sans appli.",
+                                           alt->nom);
+                        ImGui::PopTextWrapPos();
+                    }
+
+                    const float l = (ImGui::GetContentRegionAvail().x - style.ItemSpacing.x) * 0.5f;
+                    ImGui::BeginDisabled(occupe);
+                    if (petit_bouton("Désactiver", l))
+                    {
+                        action = {DESACTIVER, a_remplacer.paquet, a_remplacer.nom};
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::SameLine();
+                    if (petit_bouton("Désinstaller", l, true))
+                    {
+                        action = {DESINSTALLER, a_remplacer.paquet, a_remplacer.nom}; // confirmation ci-dessous
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::EndDisabled();
+
+                    ImGui::Dummy(ImVec2(0, 2));
+                    if (petit_bouton("Fermer", -FLT_MIN))
+                        ImGui::CloseCurrentPopup();
+                    ImGui::EndPopup();
+                }
+            }
+            if (!fenetre_remplacer && suivi_actif)
+                suivi_actif = false; // fenêtre fermée : plus besoin de surveiller les installations
 
             // La désinstallation supprime les données : on demande confirmation
             if (action.type == DESINSTALLER)
@@ -1335,14 +1704,26 @@ int main()
         travail.join();
     if (thread_maj.joinable())
         thread_maj.join();
+    suivi_actif = false;
+    if (thread_suivi.joinable())
+        thread_suivi.join();
+    if (thread_telephone.joinable())
+        thread_telephone.join();
+    for (std::thread& t : threads_recherche)
+        if (t.joinable())
+            t.join();
     for (Photo& photo : photos)
         if (photo.texture)
             glDeleteTextures(1, &photo.texture);
+    for (auto& [paquet, logo] : logos)
+        if (logo.texture)
+            glDeleteTextures(1, &logo.texture);
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplSDL2_Shutdown();
     ImGui::DestroyContext();
     SDL_GL_DeleteContext(gl_context);
     SDL_DestroyWindow(fenetre);
+    IMG_Quit();
     SDL_Quit();
 
     return 0;

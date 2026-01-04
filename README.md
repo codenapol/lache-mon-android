@@ -47,7 +47,7 @@ Le programme ne fait que lancer des commandes `adb` : **aucune appli n'est insta
 | **Applications désactivées** | Tout ce qui est désactivé sur le téléphone | Réactiver |
 | **Applications désinstallées** | Applis système retirées pour l'utilisateur | Réinstaller |
 
-<sub>¹ Le bouton « Remplacer » (proposition d'une alternative libre : NewPipe, Organic Maps, Signal…) est affiché mais **pas encore fonctionnel**.</sub>
+<sub>¹ « Remplacer » ouvre une fiche de l'alternative libre (NewPipe, Organic Maps, Signal…) avec son logo et sa dernière version. Le programme n'installe rien lui-même : il ouvre la fiche de l'appli dans **F-Droid** sur le téléphone (ou propose d'installer F-Droid, ou ouvre le site officiel pour les applis absentes de F-Droid). F-Droid se charge ensuite de l'installation et des mises à jour. La fiche propose ensuite de désactiver ou désinstaller l'appli d'origine.</sub>
 
 - 🔁 **Tout est réversible** : la désinstallation utilise `pm uninstall --user 0`. L'APK reste dans le système et l'appli peut être réinstallée depuis « Applications désinstallées ». Ses données, elles, sont perdues, et une confirmation est demandée.
 - 🛑 Les applis du niveau UAD-ng **« Unsafe » ne sont jamais proposées** (risque de téléphone qui ne démarre plus).
@@ -85,7 +85,7 @@ En plus des indicateurs, le programme signale :
 Testé sous Kali / Debian.
 
 ```bash
-sudo apt install build-essential libsdl2-dev libgl-dev libssl-dev adb curl fonts-noto-core
+sudo apt install build-essential libsdl2-dev libgl-dev libssl-dev libsdl2-image-dev adb curl fonts-noto-core
 ```
 
 <details>
@@ -96,6 +96,7 @@ sudo apt install build-essential libsdl2-dev libgl-dev libssl-dev adb curl fonts
 | `g++` (C++17) | Compilation |
 | SDL2 + OpenGL | Fenêtre et rendu |
 | OpenSSL (`libcrypto`) | Lecture des certificats de signature des APK |
+| SDL2_image | Logos des applis alternatives, quel que soit leur format (PNG, WebP, JPEG, SVG…) |
 | `adb` | Communication avec le téléphone |
 | `curl` | Téléchargement des listes |
 | Noto Sans *(facultatif)* | Police de l'interface (sinon police par défaut) |
@@ -147,6 +148,7 @@ Dans `~/.local/share/lache_mon_android/` (ou `$XDG_DATA_HOME/lache_mon_android/`
 ```
 lache_mon_android/
 ├── indicateurs/      # fichiers STIX2 des indicateurs MVT + sources.tsv + derniere_maj
+├── alternatives/     # version et logo des alternatives (cache, pour le mode hors ligne)
 └── uad_lists.json    # liste de debloat UAD-ng
 ```
 
@@ -161,6 +163,7 @@ Si [MVT](https://github.com/mvt-project/mvt) est installé, ses propres indicate
 ├── main.cpp              # Interface (ImGui), connexion ADB, détection des applis, actions
 ├── securite.cpp / .h     # Logiciels espions : indicateurs STIX2, analyse, certificats d'APK
 ├── uad.cpp / .h          # Téléchargement et lecture de la liste UAD-ng
+├── alternatives.cpp / .h # Alternatives libres : catalogue, version et logo (F-Droid ou éditeur)
 ├── json.h                # Mini lecteur JSON sans dépendance
 ├── outils.cpp / .h       # Commandes shell, téléchargement, chemins de données
 ├── imgui/                # Dear ImGui (sous-module git)
@@ -183,7 +186,7 @@ Si [MVT](https://github.com/mvt-project/mvt) est installé, ses propres indicate
 
 ## 🛣️ Feuille de route
 
-- [ ] Bouton « Remplacer » (installation de l'alternative libre)
+- [x] Bouton « Remplacer » (fiche de l'alternative libre, installation via F-Droid)
 - [ ] Tutoriel intégré (lien « Lancer le tuto »)
 - [ ] Appariement ADB (`adb pair`) depuis l'interface
 - [ ] Avertissement de sécurité avant la suppression d'un stalkerware détecté
@@ -199,7 +202,8 @@ Si [MVT](https://github.com/mvt-project/mvt) est installé, ses propres indicate
 | [Dear ImGui](https://github.com/ocornut/imgui) | Interface, sous-module `imgui/` (v1.91.5) | MIT |
 | [UAD-ng](https://github.com/Universal-Debloater-Alliance/universal-android-debloater-next-generation) | Liste de debloat, **téléchargée à l'exécution** | GPL-3.0 |
 | [mvt-indicators](https://github.com/mvt-project/mvt-indicators), [Amnesty Tech](https://github.com/AmnestyTech/investigations), [Echap](https://github.com/AssoEchap/stalkerware-indicators) | Indicateurs de compromission, **téléchargés à l'exécution** | Voir chaque dépôt |
-| SDL2, OpenSSL | Bibliothèques système | zlib, Apache-2.0 |
+| SDL2, SDL2_image, OpenSSL | Bibliothèques système | zlib, zlib, Apache-2.0 |
+| [F-Droid](https://f-droid.org), sites des éditeurs | Version et logo des alternatives, **téléchargés à l'exécution** | Voir chaque appli |
 
 > [!IMPORTANT]
 > Les listes (UAD-ng, indicateurs) sont **téléchargées** à l'exécution plutôt qu'embarquées : elles restent ainsi toujours à jour, et chaque source garde sa propre licence.
