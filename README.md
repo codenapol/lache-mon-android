@@ -204,6 +204,5 @@ Si [MVT](https://github.com/mvt-project/mvt) est installé, ses propres indicate
 > [!IMPORTANT]
 > Les listes (UAD-ng, indicateurs) sont **téléchargées** à l'exécution plutôt qu'embarquées : elles restent ainsi toujours à jour, et chaque source garde sa propre licence.
 
-Le robot Android est reproduit ou modifié à partir d'une création de Google, partagée selon la licence [Creative Commons Attribution 3.0](https://creativecommons.org/licenses/by/3.0/). Android et Google sont des marques de Google LLC. Ce projet n'est ni affilié à Google, ni soutenu par Google.
 
 **Licence de ce projet :** [GNU GPL v3.0 ou ultérieure](LICENSE). Copyright © 2026 codenapol.
