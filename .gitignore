@@ -26,6 +26,3 @@ Thumbs.db
 
 # Paramètres locaux de Claude Code
 .claude/settings.local.json
-
-# Logo source : contient des métadonnées d'identification (générateur d'images)
-logo.jpg
