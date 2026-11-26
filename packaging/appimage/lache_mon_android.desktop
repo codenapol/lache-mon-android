@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Lâche mon Android !
+Comment=Debloat et détection de logiciels espions sur Android, via ADB
+Exec=lache_mon_android
+Icon=lache_mon_android
+Terminal=false
+Categories=Utility;System;
+Keywords=android;adb;debloat;stalkerware;spyware;

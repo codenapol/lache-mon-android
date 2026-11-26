@@ -80,7 +80,34 @@ En plus des indicateurs, le programme signale :
 
 ## 📦 Installation
 
-### Prérequis
+### AppImage (le plus simple)
+
+Télécharge `lache_mon_android-…-x86_64.AppImage` depuis les [Releases](https://github.com/codenapol/lache-mon-android/releases), puis :
+
+```bash
+chmod +x lache_mon_android-*-x86_64.AppImage
+./lache_mon_android-*-x86_64.AppImage
+```
+
+Rien à compiler ni à installer : `adb`, SDL2, OpenSSL et la police sont inclus. Seul `curl` doit être présent (pour télécharger les listes). Fonctionne sur toute distribution x86_64 avec glibc ≥ 2.31 (Ubuntu 20.04, Debian 11, Fedora, Arch… et plus récentes).
+
+> [!IMPORTANT]
+> **Seule l'AppImage publiée dans les Releases de ce dépôt est officielle.** Aucun APK n'existe : le programme tourne sur le PC, jamais sur le téléphone. Vérifie l'empreinte avec `sha256sum -c lache_mon_android-*.AppImage.sha256`.
+
+<details>
+<summary>Construire l'AppImage soi-même</summary>
+
+Nécessite Docker. La compilation se fait dans un conteneur Ubuntu 20.04 (glibc 2.31), pour que le binaire fonctionne aussi sur les distributions plus anciennes :
+
+```bash
+VERSION=1.0.0 packaging/appimage/construire.sh   # résultat dans dist/
+```
+
+</details>
+
+### Compilation depuis les sources
+
+#### Prérequis
 
 Testé sous Kali / Debian.
 
@@ -105,7 +132,7 @@ sudo apt install build-essential libsdl2-dev libgl-dev libssl-dev libsdl2-image-
 
 </details>
 
-### Compilation
+#### Compilation
 
 ```bash
 git clone --recursive https://github.com/codenapol/lache-mon-android.git

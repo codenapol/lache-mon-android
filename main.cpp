@@ -9,6 +9,7 @@
 #include <iostream>
 #include <string>
 #include <cstdlib>
+#include <unistd.h> // access
 
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_opengl.h>
@@ -35,6 +36,33 @@
 #include "outils.h"   // executer, nettoyer, paquet_valide
 #include "securite.h" // détection de logiciels espions
 #include "uad.h"      // liste de debloat UAD-ng
+
+// Dossier de l'exécutable (avec "/" final), ou "" si inconnu. Dans une AppImage : .../usr/bin/
+std::string dossier_executable()
+{
+    std::string dossier;
+    if (char* base = SDL_GetBasePath())
+    {
+        dossier = base;
+        SDL_free(base);
+    }
+    return dossier;
+}
+
+// Si un adb est fourni à côté de l'exécutable (AppImage), il passe avant celui du système :
+// sa version est connue et assez récente pour le débogage sans fil.
+void utiliser_adb_embarque()
+{
+    const std::string dossier = dossier_executable();
+    if (dossier.empty() || access((dossier + "adb").c_str(), X_OK) != 0)
+        return;
+    const char* path = std::getenv("PATH");
+    std::string nouveau = dossier.substr(0, dossier.size() - 1); // sans le "/" final
+    if (path && *path)
+        nouveau += std::string(":") + path;
+    setenv("PATH", nouveau.c_str(), 1);
+    std::clog << "[ADB-VERIF] adb embarqué utilisé : " << dossier << "adb" << std::endl;
+}
 
 /* Vérifie que adb (Android Debug Bridge) est installé et accessible dans le PATH.
  Retourne true si adb est trouvé et répond, false sinon.*/ 
@@ -903,6 +931,7 @@ int main()
 
     std::clog << "Démarrage du programme !" << std::endl;
 
+    utiliser_adb_embarque();
     bool adb_ok = ADB_VERIF();// on verifie que ADB est installé
 
     // État de la connexion (modifié par un thread pour ne pas figer la fenêtre)
@@ -1065,11 +1094,22 @@ int main()
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = nullptr; // pas de fichier imgui.ini
 
-    // Police sobre (Noto Sans) si disponible, sinon police par défaut
-    if (!io.Fonts->AddFontFromFileTTF("/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf", 18.0f))
+    // Police sobre (Noto Sans) : d'abord à côté de l'exécutable (AppImage), sinon celle du système,
+    // sinon police par défaut d'ImGui
+    auto charger_police = [&](const char* fichier) -> ImFont*
+    {
+        for (const std::string& dossier : std::vector<std::string>{dossier_executable(), std::string("/usr/share/fonts/truetype/noto/")})
+        {
+            const std::string chemin = dossier + fichier;
+            if (!dossier.empty() && access(chemin.c_str(), R_OK) == 0)
+                return io.Fonts->AddFontFromFileTTF(chemin.c_str(), 18.0f);
+        }
+        return nullptr;
+    };
+    if (!charger_police("NotoSans-Regular.ttf"))
         io.Fonts->AddFontDefault();
     // Police grasse pour les titres de section (nullptr si absente : police normale)
-    ImFont* police_grasse = io.Fonts->AddFontFromFileTTF("/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf", 18.0f);
+    ImFont* police_grasse = charger_police("NotoSans-Bold.ttf");
 
     // Style minimaliste, inspiré de Fossify / IronFox : sombre, plat, arrondi, un seul accent
     ImGuiStyle& style = ImGui::GetStyle();
