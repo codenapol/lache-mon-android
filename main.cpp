@@ -33,6 +33,7 @@
 #include <vector>
 
 #include "alternatives.h" // alternatives libres : catalogue, version et logo
+#include "decouverte.h"   // découverte automatique du port du débogage sans fil
 #include "outils.h"   // executer, nettoyer, paquet_valide
 #include "securite.h" // détection de logiciels espions
 #include "uad.h"      // liste de debloat UAD-ng
@@ -342,6 +343,8 @@ struct InfosAppareil
     std::string client_fdroid;    // client F-Droid installé ("" si aucun)
     RapportSecurite securite; // logiciels espions, accès sensibles, réglages affaiblis
     std::string erreur; // vide si tout s'est bien passé
+    bool incomplet = false;       // téléphone disparu ou commande interrompue pendant l'analyse
+    std::string raison_incomplet; // pourquoi le résultat est incomplet
 };
 
 // Lance une commande "pm list packages ..." et renvoie l'ensemble des noms de paquets
@@ -373,6 +376,24 @@ void trier(std::vector<AppTrouvee>& apps)
     });
 }
 
+// Contrôle final de l'analyse : le téléphone doit encore répondre (adb get-state) et chaque
+// commande doit avoir renvoyé son marqueur de fin. Sinon, tout le résultat est marqué incomplet.
+void controle_final(const std::string& adb, InfosAppareil& infos)
+{
+    const size_t interrompues = suivi_commandes_incompletes();
+    const std::string etat = nettoyer(executer(adb + "get-state"));
+    if (etat != "device")
+        infos.raison_incomplet = "le téléphone a disparu pendant l'analyse";
+    else if (interrompues > 0)
+        infos.raison_incomplet = std::to_string(interrompues) +
+            (interrompues > 1 ? " commandes ne sont pas allées jusqu'au bout"
+                              : " commande n'est pas allée jusqu'au bout");
+    infos.incomplet = !infos.raison_incomplet.empty();
+    if (infos.incomplet)
+        std::clog << "[CONTROLE] Analyse incomplète : " << infos.raison_incomplet
+                  << " (get-state : " << etat << ")" << std::endl;
+}
+
 // Récupère le modèle de l'appareil et repère les bloatwares, applis problématiques,
 // applis désactivées et applis désinstallées (pour l'utilisateur)
 InfosAppareil detection_info(const std::string& cible)
@@ -389,6 +410,7 @@ InfosAppareil detection_info(const std::string& cible)
             : "Appareil non disponible : " + etat;
         return infos;
     }
+    suivi_commandes_remettre_a_zero(); // seules les commandes de cette analyse comptent
 
     infos.fabricant       = nettoyer(executer(adb + "shell getprop ro.product.manufacturer"));
     infos.modele          = nettoyer(executer(adb + "shell getprop ro.product.model"));
@@ -458,6 +480,8 @@ InfosAppareil detection_info(const std::string& cible)
     // Recherche de logiciels espions (indicateurs MVT + accès sensibles + réglages)
     infos.securite = securite::analyser(adb, installes);
 
+    controle_final(adb, infos);
+
     std::clog << "[DETECTION] " << infos.fabricant << " " << infos.modele
               << " | " << infos.bloatwares.size() << " bloatwares, "
               << infos.problematiques.size() << " applis problématiques, "
@@ -489,6 +513,18 @@ void titre_section(ImFont* police_grasse, const char* titre, int nombre,
     ImGui::TextDisabled("%d", nombre);
 }
 
+// Avertissement en haut des résultats quand l'analyse n'a pas pu aller jusqu'au bout
+void avertissement_incomplet(const InfosAppareil& infos)
+{
+    if (!infos.incomplet)
+        return;
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextColored(ImVec4(0.95f, 0.70f, 0.35f, 1.0f), "Analyse incomplète : %s.", infos.raison_incomplet.c_str());
+    ImGui::TextDisabled("Les listes ci-dessous peuvent être fausses ou partielles. "
+                        "Déconnecte-toi puis reconnecte le téléphone pour relancer l'analyse.");
+    ImGui::PopTextWrapPos();
+}
+
 // Petit bouton discret (couleur des champs, peu de marge)
 bool petit_bouton(const char* texte, float largeur, bool destructif = false)
 {
@@ -503,6 +539,45 @@ bool petit_bouton(const char* texte, float largeur, bool destructif = false)
     ImGui::PopStyleColor(destructif ? 4 : 3);
     ImGui::PopStyleVar();
     return clic;
+}
+
+// Bouton « Générer un rapport » à droite de l'en-tête du téléphone, centré sur ses deux lignes
+// (nom et version d'Android). `haut_entete` = position Y du début de l'en-tête.
+void bouton_generer_rapport(float haut_entete)
+{
+    const ImVec2 suite = ImGui::GetCursorPos(); // position après l'en-tête, rétablie à la fin
+    const char* texte = "Générer un rapport";
+    const ImGuiStyle& s = ImGui::GetStyle();
+    const float largeur = ImGui::CalcTextSize(texte).x + s.FramePadding.x * 2.0f;
+    const float hauteur_entete = suite.y - s.ItemSpacing.y - haut_entete;
+    ImGui::SetCursorPos(ImVec2(ImGui::GetWindowContentRegionMax().x - largeur,
+                               haut_entete + (hauteur_entete - ImGui::GetFrameHeight()) * 0.5f));
+    if (petit_bouton(texte, largeur))
+    {
+        // TODO : générer le rapport
+    }
+    ImGui::SetItemTooltip("Bientôt disponible.");
+    ImGui::SetCursorPos(suite);
+}
+
+// Fenêtre d'erreur modale (même style que la confirmation de désinstallation)
+void fenetre_erreur(ImFont* police_grasse, const char* id, const std::string& titre, const std::string& message)
+{
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(420, 0));
+    if (!ImGui::BeginPopupModal(id, nullptr,
+            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
+        return;
+    if (police_grasse) ImGui::PushFont(police_grasse);
+    ImGui::TextUnformatted(titre.c_str());
+    if (police_grasse) ImGui::PopFont();
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextDisabled("%s", message.c_str());
+    ImGui::PopTextWrapPos();
+    ImGui::Dummy(ImVec2(0, 4));
+    if (petit_bouton("Fermer", -FLT_MIN))
+        ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
 }
 
 // Infobulle d'une appli : paquet, description UAD-ng, applis qui en dépendent
@@ -946,6 +1021,32 @@ int main()
     std::atomic<bool> action_en_cours{false};
     Action           a_confirmer;     // désinstallation en attente de confirmation
 
+    // Découverte automatique du port (thread pour ne pas figer la fenêtre)
+    std::thread        thread_decouverte;
+    std::atomic<bool>  decouverte_en_cours{false};
+    bool               decouverte_finie = false; // résultat prêt à lire (protégé par verrou)
+    ResultatDecouverte resultat_decouverte;      // protégé par verrou
+    std::string        titre_erreur_decouverte, message_erreur_decouverte; // fenêtre d'erreur
+
+    auto lancer_decouverte = [&](const std::string& ip)
+    {
+        if (decouverte_en_cours)
+            return;
+        if (thread_decouverte.joinable())
+            thread_decouverte.join();
+        decouverte_en_cours = true;
+        thread_decouverte = std::thread([&, ip]()
+        {
+            ResultatDecouverte r = decouverte::trouver_port(ip);
+            {
+                std::lock_guard<std::mutex> garde(verrou);
+                resultat_decouverte = std::move(r);
+                decouverte_finie = true;
+            }
+            decouverte_en_cours = false;
+        });
+    };
+
     // Fenêtre « Remplacer »
     Action            a_remplacer;      // appli à remplacer (paquet + nom)
     std::map<std::string, std::shared_ptr<RechercheAlternative>> recherches; // par paquet d'alternative
@@ -1278,10 +1379,13 @@ int main()
                 msg_maj    = message_maj;
             }
 
+            const float haut_entete = ImGui::GetCursorPosY();
             ImGui::SetWindowFontScale(1.35f);
             ImGui::TextUnformatted((vue.fabricant + " " + vue.modele).c_str());
             ImGui::SetWindowFontScale(1.0f);
             ImGui::TextDisabled("Android %s  ·  %s", vue.version_android.c_str(), cible.c_str());
+            bouton_generer_rapport(haut_entete);
+            avertissement_incomplet(vue);
 
             ImGui::Dummy(ImVec2(0, 4));
             ImGui::Separator();
@@ -1646,18 +1750,54 @@ int main()
                                      ImGuiInputTextFlags_CharsNoBlank);
 
             ImGui::TextDisabled("Port");
-            ImGui::SetNextItemWidth(-FLT_MIN);
+            const char* texte_decouverte = "Découverte automatique";
+            const float largeur_decouverte = ImGui::CalcTextSize(texte_decouverte).x + style.FramePadding.x * 2.0f;
+            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - largeur_decouverte - style.ItemSpacing.x);
             if (ImGui::InputInt("##port", &Port, 0, 0))
             {
                 if (Port < 0)     Port = 0;
                 if (Port > 65535) Port = 65535;
             }
+            ImGui::SameLine();
+            ImGui::BeginDisabled(IP_Cible.empty() || decouverte_en_cours || etat == CONNEXION_EN_COURS);
+            if (petit_bouton(decouverte_en_cours ? "Recherche..." : texte_decouverte, largeur_decouverte))
+            {
+                if (decouverte::ipv4_valide(IP_Cible))
+                    lancer_decouverte(IP_Cible);
+                else
+                {
+                    titre_erreur_decouverte   = "Adresse IP invalide";
+                    message_erreur_decouverte = "« " + IP_Cible + " » n'est pas une adresse IP valide. "
+                        "Écris l'adresse affichée dans Débogage sans fil, sans le port (exemple : 192.168.1.42).";
+                    ImGui::OpenPopup("Erreur découverte");
+                }
+            }
+            ImGui::EndDisabled();
+            ImGui::SetItemTooltip("Trouve le port du débogage sans fil à partir de l'adresse IP.");
+
+            // Résultat de la découverte : port rempli, ou fenêtre d'erreur
+            {
+                std::lock_guard<std::mutex> garde(verrou);
+                if (decouverte_finie)
+                {
+                    decouverte_finie = false;
+                    if (resultat_decouverte.port > 0)
+                        Port = resultat_decouverte.port;
+                    else
+                    {
+                        titre_erreur_decouverte   = "Port introuvable";
+                        message_erreur_decouverte = resultat_decouverte.erreur;
+                        ImGui::OpenPopup("Erreur découverte");
+                    }
+                }
+            }
+            fenetre_erreur(police_grasse, "Erreur découverte", titre_erreur_decouverte, message_erreur_decouverte);
 
             ImGui::Dummy(ImVec2(0, 8));
 
             // Bouton de connexion : lance adb connect + detection_info dans un thread
             const bool en_connexion = (etat == CONNEXION_EN_COURS);
-            ImGui::BeginDisabled(!adb_ok || IP_Cible.empty() || Port == 0 || en_connexion);
+            ImGui::BeginDisabled(!adb_ok || IP_Cible.empty() || Port == 0 || en_connexion || decouverte_en_cours);
             if (ImGui::Button(en_connexion ? "Connexion..." : "Se connecter", ImVec2(-FLT_MIN, 0)))
             {
                 if (!ip_valide(IP_Cible))
@@ -1744,6 +1884,8 @@ int main()
         travail.join();
     if (thread_maj.joinable())
         thread_maj.join();
+    if (thread_decouverte.joinable())
+        thread_decouverte.join();
     suivi_actif = false;
     if (thread_suivi.joinable())
         thread_suivi.join();
