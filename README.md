@@ -74,9 +74,24 @@ En plus des indicateurs, le programme signale :
 
 ⏱️ Environ 6 s à la première analyse, 2 s ensuite (empreintes mises en cache).
 
+🧾 **Analyse fiable ou signalée incomplète** : chaque commande envoyée au téléphone se termine par un marqueur de fin, et un `adb get-state` est lancé à la fin de l'analyse. Si le téléphone disparaît en cours de route ou si une commande n'est pas allée jusqu'au bout, tout le résultat est marqué **« Analyse incomplète »** : un « aucun logiciel espion connu détecté » ne s'affiche jamais à tort comme un résultat sûr.
+
 > [!CAUTION]
 > **Si un stalkerware est détecté, ne le supprime pas tout de suite.** Sa suppression prévient souvent la personne qui l'a installé. Contacte d'abord une association spécialisée, comme [Echap](https://echap.eu.org/) en France ou la [Coalition Against Stalkerware](https://stopstalkerware.org/fr/), pour préparer ta sécurité.
 > En cas de soupçon de logiciel espion étatique : [Access Now Digital Security Helpline](https://www.accessnow.org/help/) ou Amnesty Tech.
+
+### 📄 Rapport d'analyse
+
+Le bouton **Générer un rapport**, à côté du nom du téléphone, propose deux types de rapport :
+
+| Type | Contenu | Format |
+|---|---|---|
+| **Basique** (par défaut) | Appareil, déroulement de l'analyse (complète ou non), logiciels espions, accès sensibles, réglages de sécurité contrôlés un par un, nombre d'applis par catégorie, bases utilisées et **limites de l'analyse** | **PDF** (par défaut) ou **HTML** |
+| **Complet** (à venir) | Pour une analyse par un expert ou pour servir de pièce à conviction en justice | |
+
+- Le rapport est enregistré dans le dossier **Documents** (`~/Documents` ou `XDG_DOCUMENTS_DIR`), sous un nom comme `Rapport_Ulefone_Armor_22_2026-11-27_12h31.pdf`. Un rapport existant n'est **jamais écrasé** et le fichier n'est lisible que par son propriétaire.
+- L'**adresse IP** du téléphone n'y figure pas : le rapport peut être transmis à une association ou à un proche.
+- Le PDF est produit par le programme lui-même, **sans dépendance** supplémentaire.
 
 ## 📦 Installation
 
@@ -158,10 +173,27 @@ make
 
 ### 2. Se connecter
 
-Dans le programme, saisis l'**adresse IP** et le **port** affichés sur l'écran « Débogage sans fil », puis clique sur **Se connecter**.
+Dans le programme, saisis l'**adresse IP** affichée sur l'écran « Débogage sans fil », puis :
+
+- clique sur **Découverte automatique** à côté du champ Port : le programme retrouve le port tout seul ;
+- ou recopie le **port** affiché sur le téléphone.
+
+Clique ensuite sur **Se connecter**.
 
 > [!TIP]
-> Le port de connexion n'est **pas** le même que celui de l'association, et il change à chaque activation du débogage sans fil.
+> Le port de connexion n'est **pas** le même que celui de l'association, et il change à chaque activation du débogage sans fil : c'est là que la découverte automatique sert.
+
+<details>
+<summary>Comment fonctionne la découverte automatique ?</summary>
+
+1. Le programme vérifie que l'adresse saisie est une adresse IPv4 valide.
+2. Il cherche le port annoncé par le téléphone sur le réseau local (**mDNS**, `adb mdns services`).
+3. Sinon (PC et téléphone sur des sous-réseaux différents, mDNS bloqué…), il **scanne les ports 30000 à 60999**, où Android place le débogage sans fil, ainsi que 5555. Comptez 1 à 3 secondes.
+4. Chaque port ouvert est **vérifié avec le protocole adb** : un autre service ouvert sur le téléphone n'est jamais pris pour le bon port. Rien n'est demandé ni modifié sur le téléphone.
+
+Une fenêtre d'erreur explique le problème si le téléphone ne répond pas, si aucun port de débogage n'est trouvé, ou si plusieurs ports possibles empêchent de choisir.
+
+</details>
 
 ### 3. Télécharger les listes
 
@@ -191,8 +223,10 @@ Si [MVT](https://github.com/mvt-project/mvt) est installé, ses propres indicate
 ├── securite.cpp / .h     # Logiciels espions : indicateurs STIX2, analyse, certificats d'APK
 ├── uad.cpp / .h          # Téléchargement et lecture de la liste UAD-ng
 ├── alternatives.cpp / .h # Alternatives libres : catalogue, version et logo (F-Droid ou éditeur)
+├── decouverte.cpp / .h   # Découverte automatique du port du débogage sans fil (mDNS, scan, sonde adb)
+├── rapport.cpp / .h      # Rapports d'analyse : écriture en PDF (sans bibliothèque) ou en HTML
 ├── json.h                # Mini lecteur JSON sans dépendance
-├── outils.cpp / .h       # Commandes shell, téléchargement, chemins de données
+├── outils.cpp / .h       # Commandes shell (avec marqueur de fin), téléchargement, chemins de données
 ├── imgui/                # Dear ImGui (sous-module git)
 ├── photo de telephone/   # Photos des modèles reconnus
 ├── logo.bmp              # Icône de la fenêtre
@@ -217,7 +251,9 @@ Si [MVT](https://github.com/mvt-project/mvt) est installé, ses propres indicate
 - [ ] Tutoriel intégré (lien « Lancer le tuto »)
 - [ ] Appariement ADB (`adb pair`) depuis l'interface
 - [ ] Avertissement de sécurité avant la suppression d'un stalkerware détecté
-- [ ] Export d'un rapport d'analyse
+- [x] Découverte automatique du port du débogage sans fil
+- [x] Rapport d'analyse basique (PDF ou HTML)
+- [ ] Rapport d'analyse complet (expertise, pièce à conviction)
 - [ ] Historique des installations et désinstallations (traces d'un espion déjà supprimé)
 - [ ] Version Windows
 - [ ] Traduction française des descriptions UAD-ng
