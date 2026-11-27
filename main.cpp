@@ -24,6 +24,7 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <ctime>
 #include <cstdio>
 #include <map>
 #include <memory>
@@ -34,6 +35,7 @@
 
 #include "alternatives.h" // alternatives libres : catalogue, version et logo
 #include "decouverte.h"   // découverte automatique du port du débogage sans fil
+#include "rapport.h"      // rapports d'analyse (PDF ou HTML)
 #include "outils.h"   // executer, nettoyer, paquet_valide
 #include "securite.h" // détection de logiciels espions
 #include "uad.h"      // liste de debloat UAD-ng
@@ -490,6 +492,191 @@ InfosAppareil detection_info(const std::string& cible)
     return infos;
 }
 
+// Date et heure locales au format « 27/11/2026 à 10:52 » (`pour_fichier` : « 2026-11-27_10h52 »)
+std::string date_heure(bool pour_fichier)
+{
+    const std::time_t maintenant = std::time(nullptr);
+    std::tm local{};
+    localtime_r(&maintenant, &local);
+    char tampon[32];
+    std::strftime(tampon, sizeof(tampon), pour_fichier ? "%Y-%m-%d_%Hh%M" : "%d/%m/%Y à %H:%M", &local);
+    return tampon;
+}
+
+// Nom du fichier de rapport : « Rapport_Ulefone_Armor_22_2026-11-27_10h52 » (caractères sûrs seulement)
+std::string nom_fichier_rapport(const InfosAppareil& infos)
+{
+    std::string nom = "Rapport_" + infos.fabricant + "_" + infos.modele + "_" + date_heure(true);
+    for (char& c : nom)
+        if (!(std::isalnum((unsigned char)c) || c == '-' || c == '_'))
+            c = '_';
+    return nom;
+}
+
+// « Nom lisible (paquet) », ou seulement le paquet si l'appli n'a pas de nom connu
+std::string nom_et_paquet(const std::string& paquet)
+{
+    const std::string nom = nom_de(paquet);
+    return nom == paquet ? paquet : nom + " (" + paquet + ")";
+}
+
+// Section « Réglages de sécurité » du rapport : chaque point contrôlé par securite::analyser,
+// avec son résultat. Un point est en défaut quand son texte d'alerte (securite.cpp) est présent.
+void ajouter_reglages_securite(Rapport& r, const RapportSecurite& s)
+{
+    struct Point
+    {
+        const char* nom;     // ce qui est contrôlé
+        const char* role;    // à quoi il sert
+        const char* alerte;  // texte exact de l'alerte dans securite.cpp
+        const char* bon;     // résultat quand tout va bien
+        const char* mauvais; // résultat en défaut
+    };
+    const Point points[] = {
+        {"Google Play Protect", "analyse les applis installées à la recherche de logiciels malveillants",
+         "Google Play Protect est désactivé.", "activé", "désactivé"},
+        {"Analyse des applis inconnues", "Play Protect envoie à Google les applis inconnues pour les examiner",
+         "Play Protect n'analyse plus les applis inconnues.", "activée", "désactivée"},
+        {"Vérification des installations par ADB", "contrôle les applis installées depuis un ordinateur",
+         "Les applis installées par ADB ne sont plus vérifiées.", "activée", "désactivée"},
+        {"Accès root", "un accès root (su, Magisk) permet à une appli de contourner toutes les protections",
+         "Accès root détecté (su ou Magisk présent).", "non détecté", "détecté"},
+        {"Bootloader", "un bootloader déverrouillé permet de modifier le système",
+         "Bootloader déverrouillé : le système a pu être modifié.", "aucun déverrouillage détecté", "déverrouillé"},
+    };
+
+    auto en_defaut = [&](const char* alerte)
+    { return std::find(s.alertes.begin(), s.alertes.end(), alerte) != s.alertes.end(); };
+
+    size_t defauts = 0;
+    for (const Point& p : points)
+        defauts += en_defaut(p.alerte);
+    if (defauts == 0)
+        r.ajouter(TypeBloc::TEXTE, "Aucun réglage affaibli détecté. Les " + std::to_string(std::size(points)) +
+                                   " points suivants ont été contrôlés :");
+    else
+        r.ajouter(TypeBloc::ALERTE, std::to_string(defauts) + " réglage(s) affaibli(s) sur " +
+                                    std::to_string(std::size(points)) + " points contrôlés :");
+
+    for (const Point& p : points)
+    {
+        const bool defaut = en_defaut(p.alerte);
+        r.ajouter(TypeBloc::PUCE, std::string(p.nom) + " : " + (defaut ? p.mauvais : p.bon) + (defaut ? " (à corriger)" : "") +
+                                  ". Rôle : " + p.role + ".");
+    }
+
+    // Alerte éventuelle qui ne correspondrait à aucun point ci-dessus : jamais perdue
+    for (const std::string& alerte : s.alertes)
+        if (std::none_of(std::begin(points), std::end(points), [&](const Point& p) { return alerte == p.alerte; }))
+            r.ajouter(TypeBloc::ALERTE, alerte);
+}
+
+// Rapport basique : résumé de l'analyse, suivi de ses limites.
+// L'adresse IP n'y figure pas : le rapport peut être transmis à quelqu'un d'autre.
+Rapport rapport_basique(const InfosAppareil& infos)
+{
+    const RapportSecurite& s = infos.securite;
+    Rapport r;
+    r.titre = "Rapport d'analyse " + infos.fabricant + " " + infos.modele;
+
+    r.ajouter(TypeBloc::TITRE, "Rapport d'analyse du téléphone");
+    r.ajouter(TypeBloc::DISCRET, "Généré le " + date_heure(false) + " par Lâche mon Android ! (rapport basique)");
+
+    r.ajouter(TypeBloc::SECTION, "Appareil");
+    r.ajouter(TypeBloc::PUCE, "Fabricant : " + infos.fabricant);
+    r.ajouter(TypeBloc::PUCE, "Modèle : " + infos.modele);
+    // Certains téléphones renvoient une valeur vide de sens (ex. ".") : on ne garde qu'un vrai nom
+    if (std::any_of(infos.nom_commercial.begin(), infos.nom_commercial.end(),
+                    [](char c) { return std::isalnum((unsigned char)c); }))
+        r.ajouter(TypeBloc::PUCE, "Nom commercial : " + infos.nom_commercial);
+    r.ajouter(TypeBloc::PUCE, "Version d'Android : " + infos.version_android);
+
+    r.ajouter(TypeBloc::SECTION, "Déroulement de l'analyse");
+    if (infos.incomplet)
+        r.ajouter(TypeBloc::ALERTE, "Analyse incomplète : " + infos.raison_incomplet +
+                                    ". Les résultats ci-dessous peuvent être faux ou partiels.");
+    else
+        r.ajouter(TypeBloc::OK, "Analyse complète : toutes les vérifications sont allées jusqu'au bout "
+                                "et le téléphone répondait encore à la fin.");
+
+    r.ajouter(TypeBloc::SECTION, "Logiciels espions");
+    if (s.indicateurs_verifies == 0)
+        r.ajouter(TypeBloc::ALERTE, "Base anti-espions absente : la recherche de logiciels espions connus n'a pas été faite.");
+    else if (s.detections.empty() && s.traces.empty())
+        r.ajouter(TypeBloc::TEXTE, "Aucun logiciel espion connu détecté.");
+    else
+    {
+        r.ajouter(TypeBloc::DANGER, std::to_string(s.detections.size() + s.traces.size()) +
+                                    " logiciel(s) espion(s) ou trace(s) détecté(s).");
+        for (const Detection& d : s.detections)
+            r.ajouter(TypeBloc::PUCE, d.menace + " : appli " + nom_et_paquet(d.paquet) + ", repérée par " +
+                                      d.preuve + ". Source : " + d.source + ".");
+        for (const Trace& t : s.traces)
+            r.ajouter(TypeBloc::PUCE, t.menace + " : " + t.preuve + " « " + t.element + " ». Source : " + t.source + ".");
+        if (!s.traces.empty())
+            r.ajouter(TypeBloc::DISCRET, "Ces traces ne se suppriment pas depuis l'appli : fais analyser le téléphone "
+                                         "(MVT, ligne d'aide Amnesty Tech ou Access Now).");
+    }
+
+    r.ajouter(TypeBloc::SECTION, "Accès sensibles à vérifier");
+    if (s.a_surveiller.empty())
+        r.ajouter(TypeBloc::TEXTE, "Aucune appli installée par l'utilisateur ne dispose d'un accès sensible.");
+    else
+    {
+        r.ajouter(TypeBloc::DISCRET, "Pas forcément malveillantes : vérifie que chacune a été installée volontairement.");
+        for (const AppSensible& a : s.a_surveiller)
+        {
+            std::string acces;
+            auto ajouter = [&](bool actif, const char* texte)
+            { if (actif) acces += (acces.empty() ? "" : ", ") + std::string(texte); };
+            ajouter(a.accessibilite,  "accessibilité (lit l'écran, agit à la place de l'utilisateur)");
+            ajouter(a.administrateur, "administrateur de l'appareil");
+            ajouter(a.notifications,  "lecture de toutes les notifications");
+            ajouter(a.hors_magasin,   "installée hors magasin d'applis");
+            r.ajouter(TypeBloc::PUCE, nom_et_paquet(a.paquet) + " : " + acces + ".");
+        }
+    }
+
+    r.ajouter(TypeBloc::SECTION, "Réglages de sécurité");
+    ajouter_reglages_securite(r, s);
+
+    r.ajouter(TypeBloc::SECTION, "Applications");
+    r.ajouter(TypeBloc::PUCE, "Bloatwares actifs : " + std::to_string(infos.bloatwares.size()));
+    r.ajouter(TypeBloc::PUCE, "Suppression avancée possible : " + std::to_string(infos.avancees.size()));
+    r.ajouter(TypeBloc::PUCE, "Suppression experte possible : " + std::to_string(infos.expertes.size()));
+    r.ajouter(TypeBloc::PUCE, "Applications problématiques : " + std::to_string(infos.problematiques.size()));
+    r.ajouter(TypeBloc::PUCE, "Applications désactivées : " + std::to_string(infos.desactivees.size()));
+    r.ajouter(TypeBloc::PUCE, "Applications désinstallées pour l'utilisateur : " + std::to_string(infos.desinstallees.size()));
+
+    r.ajouter(TypeBloc::SECTION, "Bases utilisées");
+    const std::string date_base = securite::date_mise_a_jour();
+    r.ajouter(TypeBloc::PUCE, "Indicateurs de compromission (projet MVT) : " + std::to_string(s.indicateurs_verifies) +
+                              (date_base.empty() ? "" : ", mis à jour le " + date_base));
+    r.ajouter(TypeBloc::PUCE, "Liste de debloat UAD-ng : " + std::to_string(uad::nombre()) + " applis connues");
+
+    r.ajouter(TypeBloc::SECTION, "Limites de l'analyse");
+    r.ajouter(TypeBloc::PUCE, "Pas d'accès root : seules les informations lisibles par le débogage ADB sont examinées. "
+                              "Les données privées des applis et une grande partie du système restent hors de portée.");
+    r.ajouter(TypeBloc::PUCE, "Seuls les logiciels espions déjà connus sont détectés (indicateurs publiés par Amnesty "
+                              "International, Echap, Citizen Lab... et rassemblés par MVT). Un logiciel espion récent "
+                              "ou fait sur mesure peut passer inaperçu : « aucun logiciel espion connu détecté » ne "
+                              "prouve pas que le téléphone est sain.");
+    r.ajouter(TypeBloc::PUCE, "Faux positifs possibles dans les accès sensibles : des applis légitimes (gestionnaire de "
+                              "mots de passe, lanceur, montre connectée, outil d'accessibilité) ont besoin de ces accès.");
+    r.ajouter(TypeBloc::PUCE, "Noms de processus venant d'iOS écartés : beaucoup d'indicateurs de processus visent "
+                              "l'iPhone. Quand un nom correspond à un programme du système Android (par exemple "
+                              "gatekeeperd), il est écarté pour éviter une fausse alerte ; un logiciel espion qui "
+                              "prendrait ce nom ne serait pas signalé.");
+    r.ajouter(TypeBloc::PUCE, "Android tronque les noms de processus à 15 caractères : la comparaison porte alors "
+                              "sur le début du nom.");
+    r.ajouter(TypeBloc::PUCE, "Empreintes et certificats vérifiés seulement pour les applis installées par "
+                              "l'utilisateur, pas pour les applis système.");
+    r.ajouter(TypeBloc::PUCE, "Fichiers suspects recherchés seulement dans les dossiers lisibles sans root "
+                              "(stockage partagé, /data/local/tmp).");
+    r.ajouter(TypeBloc::PUCE, "Résultat valable au moment de l'analyse uniquement.");
+    return r;
+}
+
 // Action demandée par un clic dans une liste
 enum TypeAction { AUCUNE, DESACTIVER, DESINSTALLER, REACTIVER, REINSTALLER, REMPLACER };
 struct Action
@@ -543,7 +730,7 @@ bool petit_bouton(const char* texte, float largeur, bool destructif = false)
 
 // Bouton « Générer un rapport » à droite de l'en-tête du téléphone, centré sur ses deux lignes
 // (nom et version d'Android). `haut_entete` = position Y du début de l'en-tête.
-void bouton_generer_rapport(float haut_entete)
+bool bouton_generer_rapport(float haut_entete)
 {
     const ImVec2 suite = ImGui::GetCursorPos(); // position après l'en-tête, rétablie à la fin
     const char* texte = "Générer un rapport";
@@ -552,12 +739,9 @@ void bouton_generer_rapport(float haut_entete)
     const float hauteur_entete = suite.y - s.ItemSpacing.y - haut_entete;
     ImGui::SetCursorPos(ImVec2(ImGui::GetWindowContentRegionMax().x - largeur,
                                haut_entete + (hauteur_entete - ImGui::GetFrameHeight()) * 0.5f));
-    if (petit_bouton(texte, largeur))
-    {
-        // TODO : générer le rapport
-    }
-    ImGui::SetItemTooltip("Bientôt disponible.");
+    const bool clic = petit_bouton(texte, largeur);
     ImGui::SetCursorPos(suite);
+    return clic;
 }
 
 // Fenêtre d'erreur modale (même style que la confirmation de désinstallation)
@@ -891,6 +1075,81 @@ const std::vector<ModeleTel> CATALOGUE = {
 
 
 // "pixel 6" doit reconnaître "Pixel 6" et "Pixel 6a", mais pas "Pixel 60"
+// Fenêtre « Générer un rapport » : type (basique, complet bientôt) et format (PDF, HTML)
+struct ChoixRapport
+{
+    int         format = 0;      // 0 = PDF (par défaut), 1 = HTML
+    std::string message;         // résultat de la dernière génération
+    bool        reussi = false;
+};
+
+void fenetre_rapport(ImFont* police_grasse, const InfosAppareil& infos, ChoixRapport& choix)
+{
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(460, 0));
+    if (!ImGui::BeginPopupModal("Rapport", nullptr,
+            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
+        return;
+
+    if (police_grasse) ImGui::PushFont(police_grasse);
+    ImGui::TextUnformatted("Générer un rapport");
+    if (police_grasse) ImGui::PopFont();
+    ImGui::PushTextWrapPos(0.0f);
+
+    // --- Type de rapport ---
+    int type = 0; // seul le rapport basique existe pour l'instant
+    ImGui::RadioButton("Basique", &type, 0);
+    ImGui::Indent();
+    ImGui::TextDisabled("Résumé de l'analyse : appareil, logiciels espions, accès sensibles, "
+                        "réglages, nombre d'applis, et les limites de l'analyse.");
+    ImGui::Unindent();
+
+    ImGui::BeginDisabled();
+    ImGui::RadioButton("Complet", &type, 1);
+    ImGui::EndDisabled();
+    ImGui::Indent();
+    ImGui::TextDisabled("Pour une analyse par un expert, ou pour servir de pièce à conviction en justice. "
+                        "Bientôt disponible.");
+    ImGui::Unindent();
+
+    ImGui::Dummy(ImVec2(0, 2));
+    ImGui::Separator();
+
+    // --- Format ---
+    ImGui::TextDisabled("Format");
+    ImGui::RadioButton("PDF", &choix.format, 0);
+    ImGui::SameLine(0.0f, 24.0f);
+    ImGui::RadioButton("HTML", &choix.format, 1);
+    std::string dossier = rapport::dossier_documents().string(); // affiché avec « ~ » pour le dossier personnel
+    if (const char* home = std::getenv("HOME"); home && *home && dossier.rfind(home, 0) == 0)
+        dossier = "~" + dossier.substr(std::string(home).size());
+    ImGui::TextDisabled("Enregistré dans %s", dossier.c_str());
+
+    if (infos.incomplet)
+        ImGui::TextColored(COULEUR_ALERTE, "L'analyse est incomplète : le rapport le signalera.");
+    if (!choix.message.empty())
+        ImGui::TextColored(choix.reussi ? COULEUR_OK : COULEUR_ALERTE, "%s", choix.message.c_str());
+    ImGui::PopTextWrapPos();
+    ImGui::Dummy(ImVec2(0, 4));
+
+    // --- Boutons ---
+    const float l = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+    if (petit_bouton(choix.reussi ? "Fermer" : "Annuler", l))
+        ImGui::CloseCurrentPopup();
+    ImGui::SameLine();
+    if (petit_bouton("Générer", l))
+    {
+        std::filesystem::path chemin;
+        std::string erreur;
+        const FormatRapport format = choix.format == 0 ? FormatRapport::PDF : FormatRapport::HTML;
+        choix.reussi = rapport::enregistrer(rapport_basique(infos), format, nom_fichier_rapport(infos), chemin, erreur);
+        // Le dossier est affiché au-dessus : le message ne donne que le nom du fichier
+        choix.message = choix.reussi ? "Rapport enregistré : " + chemin.filename().string() : erreur;
+        std::clog << "[RAPPORT] " << (choix.reussi ? "Rapport enregistré : " + chemin.string() : erreur) << std::endl;
+    }
+    ImGui::EndPopup();
+}
+
 bool contient_cle(const std::string& texte, const std::string& cle)
 {
     size_t pos = texte.find(cle);
@@ -1020,6 +1279,7 @@ int main()
     std::thread      travail;
     std::atomic<bool> action_en_cours{false};
     Action           a_confirmer;     // désinstallation en attente de confirmation
+    ChoixRapport     choix_rapport;   // fenêtre « Générer un rapport »
 
     // Découverte automatique du port (thread pour ne pas figer la fenêtre)
     std::thread        thread_decouverte;
@@ -1384,7 +1644,13 @@ int main()
             ImGui::TextUnformatted((vue.fabricant + " " + vue.modele).c_str());
             ImGui::SetWindowFontScale(1.0f);
             ImGui::TextDisabled("Android %s  ·  %s", vue.version_android.c_str(), cible.c_str());
-            bouton_generer_rapport(haut_entete);
+            if (bouton_generer_rapport(haut_entete))
+            {
+                choix_rapport.message.clear();
+                choix_rapport.reussi = false;
+                ImGui::OpenPopup("Rapport");
+            }
+            fenetre_rapport(police_grasse, vue, choix_rapport);
             avertissement_incomplet(vue);
 
             ImGui::Dummy(ImVec2(0, 4));
