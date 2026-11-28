@@ -31,3 +31,4 @@ Thumbs.db
 dist/
 tests/test_usb
 tests/test_association
+tests/test_conseils_espion

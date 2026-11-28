@@ -79,6 +79,8 @@ En plus des indicateurs, le programme signale :
 > [!CAUTION]
 > **Si un stalkerware est détecté, ne le supprime pas tout de suite.** Sa suppression prévient souvent la personne qui l'a installé. Contacte d'abord une association spécialisée, comme [Echap](https://echap.eu.org/) en France ou la [Coalition Against Stalkerware](https://stopstalkerware.org/fr/), pour préparer ta sécurité.
 > En cas de soupçon de logiciel espion étatique : [Access Now Digital Security Helpline](https://www.accessnow.org/help/) ou Amnesty Tech.
+>
+> Le programme le rappelle : avant toute désactivation ou désinstallation d'un logiciel espion détecté, une fenêtre d'avertissement donne ces contacts (liens ouverts dans le navigateur du PC, jamais sur le téléphone).
 
 ### 📄 Rapport d'analyse
 
@@ -258,7 +260,7 @@ Si [MVT](https://github.com/mvt-project/mvt) est installé, ses propres indicate
 - [x] Bouton « Remplacer » (fiche de l'alternative libre, installation via F-Droid)
 - [ ] Tutoriel intégré (lien « Lancer le tuto »)
 - [x] Association ADB (`adb pair`) depuis l'interface
-- [ ] Avertissement de sécurité avant la suppression d'un stalkerware détecté
+- [x] Avertissement de sécurité avant la suppression d'un logiciel espion détecté
 - [x] Découverte automatique du port du débogage sans fil
 - [x] Rapport d'analyse basique (PDF ou HTML)
 - [ ] Rapport d'analyse complet (expertise, pièce à conviction)

@@ -35,6 +35,7 @@
 #include "adb.h"            // adb embarqué, connexion, commandes sur le téléphone
 #include "alternatives.h" // alternatives libres : catalogue, version et logo
 #include "association.h"  // association du PC au téléphone (adb pair)
+#include "conseils_espion.h" // avertissement avant de supprimer un logiciel espion
 #include "analyse.h"        // analyse du téléphone (InfosAppareil, detection_info)
 #include "catalogue_apps.h" // applications connues (nom_de, alternative_de)
 #include "decouverte.h"   // découverte automatique du port du débogage sans fil
@@ -873,6 +874,8 @@ int main()
     std::thread      travail;
     std::atomic<bool> action_en_cours{false};
     Action           a_confirmer;     // désinstallation en attente de confirmation
+    Action           a_avertir;       // logiciel espion à désactiver / désinstaller, en attente de confirmation
+    AvertissementEspion avertissement_espion; // texte de la fenêtre « Avertissement espion »
     ChoixRapport     choix_rapport;   // fenêtre « Générer un rapport »
 
     // Découverte automatique du port (thread pour ne pas figer la fenêtre)
@@ -1633,8 +1636,52 @@ int main()
             if (!fenetre_remplacer && suivi_actif)
                 suivi_actif = false; // fenêtre fermée : plus besoin de surveiller les installations
 
+            // Logiciel espion détecté : le retirer peut prévenir la personne qui l'a installé.
+            // Avertissement avant toute désactivation ou désinstallation, d'où que vienne le clic
+            // (il remplace alors la confirmation de désinstallation ci-dessous).
+            if (action.type == DESACTIVER || action.type == DESINSTALLER)
+            {
+                if (const Detection* d = espion::detection_de(vue.securite, action.paquet))
+                {
+                    avertissement_espion = espion::avertissement(*d, action.type == DESINSTALLER);
+                    a_avertir = action;
+                    action = Action();
+                    ImGui::OpenPopup("Avertissement espion");
+                }
+            }
+            ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+            ImGui::SetNextWindowSize(ImVec2(420, 0));
+            if (ImGui::BeginPopupModal("Avertissement espion", nullptr,
+                    ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
+            {
+                if (police_grasse) ImGui::PushFont(police_grasse);
+                ImGui::TextColored(COULEUR_DANGER, "%s", avertissement_espion.titre.c_str());
+                if (police_grasse) ImGui::PopFont();
+                ImGui::PushTextWrapPos(0.0f);
+                ImGui::TextUnformatted(avertissement_espion.texte.c_str());
+                ImGui::PopTextWrapPos();
+                ImGui::Dummy(ImVec2(0, 2));
+                for (const LienAide& lien : avertissement_espion.liens)
+                {
+                    ImGui::TextLinkOpenURL(lien.nom.c_str(), lien.url.c_str()); // navigateur du PC
+                    ImGui::SetItemTooltip("%s", lien.url.c_str());
+                }
+                ImGui::Dummy(ImVec2(0, 4));
+
+                const float l = (ImGui::GetContentRegionAvail().x - style.ItemSpacing.x) * 0.5f;
+                if (petit_bouton("Ne pas supprimer", l))
+                    ImGui::CloseCurrentPopup();
+                ImGui::SameLine();
+                if (petit_bouton(avertissement_espion.bouton.c_str(), l, true))
+                {
+                    action = a_avertir;
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::EndPopup();
+            }
+
             // La désinstallation supprime les données : on demande confirmation
-            if (action.type == DESINSTALLER)
+            if (action.type == DESINSTALLER && !espion::detection_de(vue.securite, action.paquet))
             {
                 a_confirmer = action;
                 action = Action();
