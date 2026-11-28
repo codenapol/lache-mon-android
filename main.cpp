@@ -24,7 +24,6 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
-#include <ctime>
 #include <cstdio>
 #include <map>
 #include <memory>
@@ -33,649 +32,17 @@
 #include <thread>
 #include <vector>
 
+#include "adb.h"            // adb embarqué, connexion, commandes sur le téléphone
 #include "alternatives.h" // alternatives libres : catalogue, version et logo
+#include "analyse.h"        // analyse du téléphone (InfosAppareil, detection_info)
+#include "catalogue_apps.h" // applications connues (nom_de, alternative_de)
 #include "decouverte.h"   // découverte automatique du port du débogage sans fil
 #include "rapport.h"      // rapports d'analyse (PDF ou HTML)
+#include "rapport_analyse.h" // contenu du rapport basique
 #include "outils.h"   // executer, nettoyer, paquet_valide
 #include "securite.h" // détection de logiciels espions
 #include "uad.h"      // liste de debloat UAD-ng
-
-// Dossier de l'exécutable (avec "/" final), ou "" si inconnu. Dans une AppImage : .../usr/bin/
-std::string dossier_executable()
-{
-    std::string dossier;
-    if (char* base = SDL_GetBasePath())
-    {
-        dossier = base;
-        SDL_free(base);
-    }
-    return dossier;
-}
-
-// Si un adb est fourni à côté de l'exécutable (AppImage), il passe avant celui du système :
-// sa version est connue et assez récente pour le débogage sans fil.
-void utiliser_adb_embarque()
-{
-    const std::string dossier = dossier_executable();
-    if (dossier.empty() || access((dossier + "adb").c_str(), X_OK) != 0)
-        return;
-    const char* path = std::getenv("PATH");
-    std::string nouveau = dossier.substr(0, dossier.size() - 1); // sans le "/" final
-    if (path && *path)
-        nouveau += std::string(":") + path;
-    setenv("PATH", nouveau.c_str(), 1);
-    std::clog << "[ADB-VERIF] adb embarqué utilisé : " << dossier << "adb" << std::endl;
-}
-
-/* Vérifie que adb (Android Debug Bridge) est installé et accessible dans le PATH.
- Retourne true si adb est trouvé et répond, false sinon.*/ 
-bool ADB_VERIF()
-{
-    int resultat = std::system("adb version > /dev/null 2>&1");
-
-    if (resultat == 0)
-    {
-        std::clog << "[ADB-VERIF] adb est installé." << std::endl;
-        return true;
-    }
-
-    std::cerr << "[ADB-VERIF] adb est introuvable ! Installe-le avec : sudo apt install adb" << std::endl;
-    return false;
-}
-
-// L'IP est insérée dans une commande shell : on n'accepte que des caractères sûrs
-bool ip_valide(const std::string& ip)
-{
-    if (ip.empty())
-        return false;
-    for (char ch : ip)
-        if (!(std::isalnum((unsigned char)ch) || ch == '.' || ch == '-' || ch == ':'))
-            return false;
-    return true;
-}
-
-// Connexion ADB sans fil. Renvoie true si connecté, sinon message d'erreur dans `erreur`.
-bool connexion_adb(const std::string& cible, std::string& erreur)
-{
-    std::string sortie = nettoyer(executer("adb connect " + cible));
-    std::clog << "[ADB] " << sortie << std::endl;
-
-    // "connected to x" ou "already connected to x" = succès ; "failed to connect to x" = échec
-    if (sortie.find("connected to") != std::string::npos && sortie.find("failed") == std::string::npos)
-        return true;
-
-    erreur = sortie.empty() ? "Connexion impossible." : sortie;
-    return false;
-}
-
-struct AppConnue
-{
-    const char* paquet;
-    const char* nom;
-};
-
-// Applications préinstallées inutiles les plus courantes (Google, constructeurs, partenaires)
-const AppConnue LISTE_BLOATWARES[] = {
-    {"com.google.android.youtube",               "YouTube"},
-    {"com.google.android.apps.youtube.music",    "YouTube Music"},
-    {"com.google.android.videos",                "Google TV"},
-    {"com.google.android.apps.tachyon",          "Google Meet (Duo)"},
-    {"com.google.android.apps.photos",           "Google Photos"},
-    {"com.google.android.apps.docs",             "Google Drive"},
-    {"com.google.android.apps.maps",             "Google Maps"},
-    {"com.google.android.gm",                    "Gmail"},
-    {"com.google.android.googlequicksearchbox",  "Application Google"},
-    {"com.google.android.apps.googleassistant",  "Google Assistant"},
-    {"com.google.ar.lens",                       "Google Lens"},
-    {"com.google.android.apps.magazines",        "Google Actualités"},
-    {"com.google.android.apps.podcasts",         "Google Podcasts"},
-    {"com.google.android.apps.subscriptions.red","Google One"},
-    {"com.google.android.apps.wellbeing",        "Bien-être numérique"},
-    {"com.google.android.feedback",              "Google Feedback"},
-    {"com.google.android.music",                 "Google Play Musique"},
-    {"com.google.android.apps.restore",          "Google Restore"},
-    {"com.facebook.appmanager",                  "Meta App Manager"},
-    {"com.facebook.services",                    "Meta Services"},
-    {"com.facebook.system",                      "Meta App Installer"},
-    {"com.netflix.partner.activation",           "Netflix (activation partenaire)"},
-    {"com.microsoft.skydrive",                   "OneDrive"},
-    {"com.microsoft.office.officehubrow",        "Microsoft 365"},
-    {"com.linkedin.android",                     "LinkedIn"},
-    {"com.booking",                              "Booking.com"},
-    {"com.opera.preinstall",                     "Opera (préinstallé)"},
-    {"com.samsung.android.bixby.agent",          "Bixby"},
-    {"com.samsung.android.app.spage",            "Samsung Free"},
-    {"com.samsung.android.game.gamehome",        "Game Launcher"},
-    {"com.samsung.android.arzone",               "AR Zone"},
-    {"com.sec.android.app.sbrowser",             "Samsung Internet"},
-    {"com.miui.analytics",                       "MIUI Analytics"},
-    {"com.miui.msa.global",                      "MIUI MSA (pubs)"},
-    {"com.miui.videoplayer",                     "Mi Vidéo"},
-    {"com.mi.globalbrowser",                     "Mi Browser"},
-    {"com.xiaomi.glgm",                          "Xiaomi Games"},
-    {"com.debug.loggerui",                       "MTK Logger"},
-};
-
-// Applications problématiques (vie privée, pistage, publicité)
-const AppConnue LISTE_PROBLEMATIQUES[] = {
-    {"com.whatsapp",                             "WhatsApp"},
-    {"com.whatsapp.w4b",                         "WhatsApp Business"},
-    {"com.facebook.katana",                      "Facebook"},
-    {"com.facebook.lite",                        "Facebook Lite"},
-    {"com.facebook.orca",                        "Messenger"},
-    {"com.facebook.mlite",                       "Messenger Lite"},
-    {"com.instagram.android",                    "Instagram"},
-    {"com.instagram.barcelona",                  "Threads"},
-    {"com.amazon.mShop.android.shopping",        "Amazon Shopping"},
-    {"in.amazon.mShop.android.shopping",         "Amazon Shopping"},
-    {"com.amazon.avod.thirdpartyclient",         "Prime Video"},
-    {"com.amazon.mp3",                           "Amazon Music"},
-    {"com.amazon.kindle",                        "Kindle"},
-    {"com.amazon.dee.app",                       "Alexa"},
-    {"com.zhiliaoapp.musically",                 "TikTok"},
-    {"com.ss.android.ugc.trill",                 "TikTok"},
-    {"com.snapchat.android",                     "Snapchat"},
-    {"com.twitter.android",                      "X (Twitter)"},
-    {"com.einnovation.temu",                     "Temu"},
-    {"com.zzkko",                                "Shein"},
-    {"com.alibaba.aliexpresshd",                 "AliExpress"},
-
-    // Meta (autres applis)
-    {"com.instagram.lite",                       "Instagram Lite"},
-    {"com.facebook.talk",                        "Messenger Kids"},
-
-    // ByteDance / vidéo courte (collecte massive, transferts hors UE)
-    {"com.zhiliaoapp.musically.go",              "TikTok Lite"},
-    {"com.ss.android.ugc.aweme",                 "Douyin"},
-    {"com.lemon.lvoverseas",                     "CapCut"},
-    {"com.kwai.video",                           "Kwai"},
-    {"video.like",                               "Likee"},
-    {"sg.bigo.live",                             "BIGO LIVE"},
-
-    // Réseaux sociaux / messageries
-    {"com.tencent.mm",                           "WeChat"},
-    {"com.vkontakte.android",                    "VK"},
-    {"com.discord",                              "Discord"},
-
-    // Rencontres (données sensibles partagées avec des régies publicitaires)
-    {"com.tinder",                               "Tinder"},
-    {"com.bumble.app",                           "Bumble"},
-    {"com.badoo.mobile",                         "Badoo"},
-    {"com.grindrapp.android",                    "Grindr"},
-
-    // Annuaire / identification d'appel (envoie le carnet de contacts)
-    {"com.truecaller",                           "Truecaller"},
-
-    // Localisation revendue à des courtiers en données
-    {"com.life360.android.safetymapd",           "Life360"},
-    {"com.weather.Weather",                      "The Weather Channel"},
-    {"com.accuweather.android",                  "AccuWeather"},
-
-    // "Nettoyeurs", navigateurs et outils connus pour pistage ou failles
-    {"com.cleanmaster.mguard",                   "Clean Master"},
-    {"com.cleanmaster.security",                 "CM Security"},
-    {"com.lenovo.anyshare.gps",                  "SHAREit"},
-    {"com.estrongs.android.pop",                 "ES Explorateur de fichiers"},
-    {"com.UCMobile.intl",                        "UC Browser"},
-    {"com.opera.mini.native",                    "Opera Mini"},
-    {"com.yandex.browser",                       "Yandex Browser"},
-
-    // Shopping (pistage publicitaire agressif)
-    {"com.contextlogic.wish",                    "Wish"},
-    {"com.alibaba.intl.android.apps.poseidon",   "Alibaba.com"},
-    {"com.amazon.venezia",                       "Amazon Appstore"},
-};
-
-// Applications qui ont une alternative libre / respectueuse de la vie privée (bouton "Remplacer")
-const AppConnue LISTE_ALTERNATIVES[] = {
-    // {paquet à remplacer, alternative proposée}
-    {"com.google.android.youtube",          "NewPipe"},
-    {"com.google.android.apps.youtube.music","NewPipe"},
-    {"com.google.android.apps.photos",      "Fossify Gallery"},
-    {"com.google.android.apps.maps",        "Organic Maps"},
-    {"com.google.android.gm",               "Thunderbird"},
-    {"com.google.android.apps.docs",        "Nextcloud"},
-    {"com.sec.android.app.sbrowser",        "IronFox"},
-    {"com.mi.globalbrowser",                "IronFox"},
-    {"com.opera.preinstall",                "IronFox"},
-    {"com.miui.videoplayer",                "VLC"},
-    {"com.whatsapp",                        "Signal"},
-    {"com.whatsapp.w4b",                    "Signal"},
-    {"com.facebook.orca",                   "Signal"},
-    {"com.facebook.mlite",                  "Signal"},
-    {"com.instagram.android",               "PixelDroid"},
-    {"com.twitter.android",                 "Mastodon"},
-    {"com.instagram.barcelona",             "Mastodon"},
-    {"com.amazon.kindle",                   "KOReader"},
-    {"com.tencent.mm",                      "Signal"},
-    {"com.facebook.katana",                 "Fedilab"},
-    {"com.facebook.lite",                   "Fedilab"},
-    {"com.instagram.lite",                  "PixelDroid"},
-    {"com.truecaller",                      "Fossify Phone"},
-    {"com.weather.Weather",                 "Breezy Weather"},
-    {"com.accuweather.android",             "Breezy Weather"},
-    {"com.estrongs.android.pop",            "Fossify File Manager"},
-    {"com.lenovo.anyshare.gps",             "LocalSend"},
-    {"com.UCMobile.intl",                   "IronFox"},
-    {"com.opera.mini.native",               "IronFox"},
-    {"com.yandex.browser",                  "IronFox"},
-    {"com.lemon.lvoverseas",                "Open Video Editor"},
-};
-
-// Renvoie l'alternative d'un paquet, ou "" s'il n'y en a pas (ou si elle n'a pas de fiche)
-std::string alternative_de(const std::string& paquet)
-{
-    for (const AppConnue& alt : LISTE_ALTERNATIVES)
-        if (paquet == alt.paquet)
-            return fiche_alternative(alt.nom) ? alt.nom : "";
-    return "";
-}
-
-// Nom lisible d'un paquet (depuis nos listes), sinon le nom du paquet lui-même
-std::string nom_de(const std::string& paquet)
-{
-    for (const AppConnue& app : LISTE_BLOATWARES)
-        if (paquet == app.paquet) return app.nom;
-    for (const AppConnue& app : LISTE_PROBLEMATIQUES)
-        if (paquet == app.paquet) return app.nom;
-    return paquet;
-}
-
-struct AppTrouvee
-{
-    std::string nom;
-    std::string paquet;
-    std::string alternative; // vide = pas de bouton "Remplacer"
-    std::string description; // description UAD-ng (en anglais), vide si inconnue
-    std::string requis_par;  // paquets qui en dépendent (UAD-ng), séparés par des virgules
-};
-
-// Premier client F-Droid installé et activé parmi `actifs`, ou "" s'il n'y en a pas
-std::string client_fdroid(const std::set<std::string>& actifs)
-{
-    for (const std::string& client : CLIENTS_FDROID)
-        if (actifs.count(client))
-            return client;
-    return "";
-}
-
-// Nom lisible tiré de la 1re ligne de la description UAD-ng ("Files by Google (https://...)"),
-// seulement si elle ressemble à un nom et pas à une phrase
-std::string nom_depuis_description(const std::string& description)
-{
-    std::string ligne = nettoyer(description.substr(0, description.find('\n')));
-    if (size_t lien = ligne.find(" (http"); lien != std::string::npos)
-        ligne = nettoyer(ligne.substr(0, lien));
-    if (ligne.empty() || ligne.size() > 40 || ligne.find(". ") != std::string::npos ||
-        ligne.back() == '.' || ligne.back() == ':' || ligne.back() == ',')
-        return "";
-    return ligne;
-}
-
-// Construit une AppTrouvee : nom de nos listes, sinon de UAD-ng, sinon le paquet ;
-// description et dépendances de UAD-ng si le paquet y figure
-AppTrouvee creer_app(const std::string& paquet, std::string nom = "")
-{
-    AppTrouvee app{nom.empty() ? nom_de(paquet) : nom, paquet, alternative_de(paquet), "", ""};
-    if (const auto entree = uad::chercher(paquet))
-    {
-        app.description = entree->description;
-        for (const std::string& p : entree->requis_par)
-            app.requis_par += (app.requis_par.empty() ? "" : ", ") + p;
-        if (app.nom == paquet)
-            if (const std::string n = nom_depuis_description(entree->description); !n.empty())
-                app.nom = n;
-    }
-    return app;
-}
-
-struct InfosAppareil
-{
-    std::string fabricant;
-    std::string modele;
-    std::string version_android;
-    std::string nom_commercial; // nom affiché dans les paramètres (ex. "Galaxy S26")
-    std::vector<AppTrouvee> bloatwares;     // nos listes + UAD-ng "Recommended"
-    std::vector<AppTrouvee> avancees;       // UAD-ng "Advanced"
-    std::vector<AppTrouvee> expertes;       // UAD-ng "Expert"
-    std::vector<AppTrouvee> problematiques;
-    std::vector<AppTrouvee> desactivees;
-    std::vector<AppTrouvee> desinstallees;
-    std::set<std::string> actifs; // paquets installés et activés (fenêtre « Remplacer »)
-    std::string client_fdroid;    // client F-Droid installé ("" si aucun)
-    RapportSecurite securite; // logiciels espions, accès sensibles, réglages affaiblis
-    std::string erreur; // vide si tout s'est bien passé
-    bool incomplet = false;       // téléphone disparu ou commande interrompue pendant l'analyse
-    std::string raison_incomplet; // pourquoi le résultat est incomplet
-};
-
-// Lance une commande "pm list packages ..." et renvoie l'ensemble des noms de paquets
-std::set<std::string> lister_paquets(const std::string& commande)
-{
-    std::set<std::string> paquets;
-    std::string liste = executer(commande);
-    size_t pos = 0;
-    while (pos < liste.size())
-    {
-        size_t fin = liste.find('\n', pos);
-        if (fin == std::string::npos) fin = liste.size();
-        std::string ligne = nettoyer(liste.substr(pos, fin - pos));
-        if (ligne.rfind("package:", 0) == 0)
-            paquets.insert(ligne.substr(8));
-        pos = fin + 1;
-    }
-    return paquets;
-}
-
-// Range une liste : applis connues (nom lisible) d'abord, puis par ordre alphabétique
-void trier(std::vector<AppTrouvee>& apps)
-{
-    std::sort(apps.begin(), apps.end(), [](const AppTrouvee& a, const AppTrouvee& b)
-    {
-        const bool a_connue = a.nom != a.paquet, b_connue = b.nom != b.paquet;
-        if (a_connue != b_connue) return a_connue;
-        return a.nom < b.nom;
-    });
-}
-
-// Contrôle final de l'analyse : le téléphone doit encore répondre (adb get-state) et chaque
-// commande doit avoir renvoyé son marqueur de fin. Sinon, tout le résultat est marqué incomplet.
-void controle_final(const std::string& adb, InfosAppareil& infos)
-{
-    const size_t interrompues = suivi_commandes_incompletes();
-    const std::string etat = nettoyer(executer(adb + "get-state"));
-    if (etat != "device")
-        infos.raison_incomplet = "le téléphone a disparu pendant l'analyse";
-    else if (interrompues > 0)
-        infos.raison_incomplet = std::to_string(interrompues) +
-            (interrompues > 1 ? " commandes ne sont pas allées jusqu'au bout"
-                              : " commande n'est pas allée jusqu'au bout");
-    infos.incomplet = !infos.raison_incomplet.empty();
-    if (infos.incomplet)
-        std::clog << "[CONTROLE] Analyse incomplète : " << infos.raison_incomplet
-                  << " (get-state : " << etat << ")" << std::endl;
-}
-
-// Récupère le modèle de l'appareil et repère les bloatwares, applis problématiques,
-// applis désactivées et applis désinstallées (pour l'utilisateur)
-InfosAppareil detection_info(const std::string& cible)
-{
-    InfosAppareil infos;
-    const std::string adb = "adb -s " + cible + " ";
-
-    // L'appareil doit être autorisé (popup "Autoriser le débogage" sur le téléphone)
-    std::string etat = nettoyer(executer(adb + "get-state"));
-    if (etat != "device")
-    {
-        infos.erreur = etat.find("unauthorized") != std::string::npos
-            ? "Autorise le débogage sur le téléphone, puis réessaie."
-            : "Appareil non disponible : " + etat;
-        return infos;
-    }
-    suivi_commandes_remettre_a_zero(); // seules les commandes de cette analyse comptent
-
-    infos.fabricant       = nettoyer(executer(adb + "shell getprop ro.product.manufacturer"));
-    infos.modele          = nettoyer(executer(adb + "shell getprop ro.product.model"));
-    infos.version_android = nettoyer(executer(adb + "shell getprop ro.build.version.release"));
-
-    // Nom commercial : propriétés constructeur, sinon nom de l'appareil dans les paramètres
-    for (const char* prop : {"ro.product.marketname", "ro.product.vendor.marketname", "ro.config.marketing_name"})
-    {
-        infos.nom_commercial = nettoyer(executer(adb + "shell getprop " + prop));
-        if (!infos.nom_commercial.empty()) break;
-    }
-    if (infos.nom_commercial.empty())
-        infos.nom_commercial = nettoyer(executer(adb + "shell settings get global device_name"));
-    if (infos.nom_commercial == "null")
-        infos.nom_commercial.clear();
-
-    std::set<std::string> installes = lister_paquets(adb + "shell pm list packages");     // installés
-    std::set<std::string> actifs    = lister_paquets(adb + "shell pm list packages -e");  // installés + activés
-    std::set<std::string> desactives= lister_paquets(adb + "shell pm list packages -d");  // installés + désactivés
-    std::set<std::string> tous      = lister_paquets(adb + "shell pm list packages -u");  // + désinstallés
-    infos.actifs        = actifs;
-    infos.client_fdroid = client_fdroid(actifs);
-
-    // Bloatwares et applis problématiques : seulement celles encore actives
-    std::set<std::string> deja_classees;
-    for (const AppConnue& app : LISTE_BLOATWARES)
-        if (actifs.count(app.paquet) && deja_classees.insert(app.paquet).second)
-            infos.bloatwares.push_back(creer_app(app.paquet, app.nom));
-
-    for (const AppConnue& app : LISTE_PROBLEMATIQUES)
-        if (actifs.count(app.paquet) && deja_classees.insert(app.paquet).second)
-            infos.problematiques.push_back(creer_app(app.paquet, app.nom));
-
-    // Autres applis actives connues de UAD-ng, rangées selon le risque de leur suppression
-    // (le niveau "Unsafe" n'est jamais proposé : il peut empêcher le téléphone de démarrer)
-    for (const std::string& p : actifs)
-    {
-        if (deja_classees.count(p))
-            continue;
-        const auto entree = uad::chercher(p);
-        if (!entree)
-            continue;
-        switch (entree->niveau)
-        {
-            case NiveauUAD::RECOMMANDE: infos.bloatwares.push_back(creer_app(p)); break;
-            case NiveauUAD::AVANCE:     infos.avancees.push_back(creer_app(p));   break;
-            case NiveauUAD::EXPERT:     infos.expertes.push_back(creer_app(p));   break;
-            default: break;
-        }
-    }
-
-    // Applis désactivées (réactivables)
-    for (const std::string& p : desactives)
-        infos.desactivees.push_back(creer_app(p));
-
-    // Applis désinstallées pour l'utilisateur : présentes dans -u mais plus installées
-    for (const std::string& p : tous)
-        if (!installes.count(p))
-            infos.desinstallees.push_back(creer_app(p));
-
-    trier(infos.bloatwares);
-    trier(infos.avancees);
-    trier(infos.expertes);
-    trier(infos.desactivees);
-    trier(infos.desinstallees);
-
-    // Recherche de logiciels espions (indicateurs MVT + accès sensibles + réglages)
-    infos.securite = securite::analyser(adb, installes);
-
-    controle_final(adb, infos);
-
-    std::clog << "[DETECTION] " << infos.fabricant << " " << infos.modele
-              << " | " << infos.bloatwares.size() << " bloatwares, "
-              << infos.problematiques.size() << " applis problématiques, "
-              << infos.desactivees.size() << " désactivées, "
-              << infos.desinstallees.size() << " désinstallées" << std::endl;
-    return infos;
-}
-
-// Date et heure locales au format « 27/11/2026 à 10:52 » (`pour_fichier` : « 2026-11-27_10h52 »)
-std::string date_heure(bool pour_fichier)
-{
-    const std::time_t maintenant = std::time(nullptr);
-    std::tm local{};
-    localtime_r(&maintenant, &local);
-    char tampon[32];
-    std::strftime(tampon, sizeof(tampon), pour_fichier ? "%Y-%m-%d_%Hh%M" : "%d/%m/%Y à %H:%M", &local);
-    return tampon;
-}
-
-// Nom du fichier de rapport : « Rapport_Ulefone_Armor_22_2026-11-27_10h52 » (caractères sûrs seulement)
-std::string nom_fichier_rapport(const InfosAppareil& infos)
-{
-    std::string nom = "Rapport_" + infos.fabricant + "_" + infos.modele + "_" + date_heure(true);
-    for (char& c : nom)
-        if (!(std::isalnum((unsigned char)c) || c == '-' || c == '_'))
-            c = '_';
-    return nom;
-}
-
-// « Nom lisible (paquet) », ou seulement le paquet si l'appli n'a pas de nom connu
-std::string nom_et_paquet(const std::string& paquet)
-{
-    const std::string nom = nom_de(paquet);
-    return nom == paquet ? paquet : nom + " (" + paquet + ")";
-}
-
-// Section « Réglages de sécurité » du rapport : chaque point contrôlé par securite::analyser,
-// avec son résultat. Un point est en défaut quand son texte d'alerte (securite.cpp) est présent.
-void ajouter_reglages_securite(Rapport& r, const RapportSecurite& s)
-{
-    struct Point
-    {
-        const char* nom;     // ce qui est contrôlé
-        const char* role;    // à quoi il sert
-        const char* alerte;  // texte exact de l'alerte dans securite.cpp
-        const char* bon;     // résultat quand tout va bien
-        const char* mauvais; // résultat en défaut
-    };
-    const Point points[] = {
-        {"Google Play Protect", "analyse les applis installées à la recherche de logiciels malveillants",
-         "Google Play Protect est désactivé.", "activé", "désactivé"},
-        {"Analyse des applis inconnues", "Play Protect envoie à Google les applis inconnues pour les examiner",
-         "Play Protect n'analyse plus les applis inconnues.", "activée", "désactivée"},
-        {"Vérification des installations par ADB", "contrôle les applis installées depuis un ordinateur",
-         "Les applis installées par ADB ne sont plus vérifiées.", "activée", "désactivée"},
-        {"Accès root", "un accès root (su, Magisk) permet à une appli de contourner toutes les protections",
-         "Accès root détecté (su ou Magisk présent).", "non détecté", "détecté"},
-        {"Bootloader", "un bootloader déverrouillé permet de modifier le système",
-         "Bootloader déverrouillé : le système a pu être modifié.", "aucun déverrouillage détecté", "déverrouillé"},
-    };
-
-    auto en_defaut = [&](const char* alerte)
-    { return std::find(s.alertes.begin(), s.alertes.end(), alerte) != s.alertes.end(); };
-
-    size_t defauts = 0;
-    for (const Point& p : points)
-        defauts += en_defaut(p.alerte);
-    if (defauts == 0)
-        r.ajouter(TypeBloc::TEXTE, "Aucun réglage affaibli détecté. Les " + std::to_string(std::size(points)) +
-                                   " points suivants ont été contrôlés :");
-    else
-        r.ajouter(TypeBloc::ALERTE, std::to_string(defauts) + " réglage(s) affaibli(s) sur " +
-                                    std::to_string(std::size(points)) + " points contrôlés :");
-
-    for (const Point& p : points)
-    {
-        const bool defaut = en_defaut(p.alerte);
-        r.ajouter(TypeBloc::PUCE, std::string(p.nom) + " : " + (defaut ? p.mauvais : p.bon) + (defaut ? " (à corriger)" : "") +
-                                  ". Rôle : " + p.role + ".");
-    }
-
-    // Alerte éventuelle qui ne correspondrait à aucun point ci-dessus : jamais perdue
-    for (const std::string& alerte : s.alertes)
-        if (std::none_of(std::begin(points), std::end(points), [&](const Point& p) { return alerte == p.alerte; }))
-            r.ajouter(TypeBloc::ALERTE, alerte);
-}
-
-// Rapport basique : résumé de l'analyse, suivi de ses limites.
-// L'adresse IP n'y figure pas : le rapport peut être transmis à quelqu'un d'autre.
-Rapport rapport_basique(const InfosAppareil& infos)
-{
-    const RapportSecurite& s = infos.securite;
-    Rapport r;
-    r.titre = "Rapport d'analyse " + infos.fabricant + " " + infos.modele;
-
-    r.ajouter(TypeBloc::TITRE, "Rapport d'analyse du téléphone");
-    r.ajouter(TypeBloc::DISCRET, "Généré le " + date_heure(false) + " par Lâche mon Android ! (rapport basique)");
-
-    r.ajouter(TypeBloc::SECTION, "Appareil");
-    r.ajouter(TypeBloc::PUCE, "Fabricant : " + infos.fabricant);
-    r.ajouter(TypeBloc::PUCE, "Modèle : " + infos.modele);
-    // Certains téléphones renvoient une valeur vide de sens (ex. ".") : on ne garde qu'un vrai nom
-    if (std::any_of(infos.nom_commercial.begin(), infos.nom_commercial.end(),
-                    [](char c) { return std::isalnum((unsigned char)c); }))
-        r.ajouter(TypeBloc::PUCE, "Nom commercial : " + infos.nom_commercial);
-    r.ajouter(TypeBloc::PUCE, "Version d'Android : " + infos.version_android);
-
-    r.ajouter(TypeBloc::SECTION, "Déroulement de l'analyse");
-    if (infos.incomplet)
-        r.ajouter(TypeBloc::ALERTE, "Analyse incomplète : " + infos.raison_incomplet +
-                                    ". Les résultats ci-dessous peuvent être faux ou partiels.");
-    else
-        r.ajouter(TypeBloc::OK, "Analyse complète : toutes les vérifications sont allées jusqu'au bout "
-                                "et le téléphone répondait encore à la fin.");
-
-    r.ajouter(TypeBloc::SECTION, "Logiciels espions");
-    if (s.indicateurs_verifies == 0)
-        r.ajouter(TypeBloc::ALERTE, "Base anti-espions absente : la recherche de logiciels espions connus n'a pas été faite.");
-    else if (s.detections.empty() && s.traces.empty())
-        r.ajouter(TypeBloc::TEXTE, "Aucun logiciel espion connu détecté.");
-    else
-    {
-        r.ajouter(TypeBloc::DANGER, std::to_string(s.detections.size() + s.traces.size()) +
-                                    " logiciel(s) espion(s) ou trace(s) détecté(s).");
-        for (const Detection& d : s.detections)
-            r.ajouter(TypeBloc::PUCE, d.menace + " : appli " + nom_et_paquet(d.paquet) + ", repérée par " +
-                                      d.preuve + ". Source : " + d.source + ".");
-        for (const Trace& t : s.traces)
-            r.ajouter(TypeBloc::PUCE, t.menace + " : " + t.preuve + " « " + t.element + " ». Source : " + t.source + ".");
-        if (!s.traces.empty())
-            r.ajouter(TypeBloc::DISCRET, "Ces traces ne se suppriment pas depuis l'appli : fais analyser le téléphone "
-                                         "(MVT, ligne d'aide Amnesty Tech ou Access Now).");
-    }
-
-    r.ajouter(TypeBloc::SECTION, "Accès sensibles à vérifier");
-    if (s.a_surveiller.empty())
-        r.ajouter(TypeBloc::TEXTE, "Aucune appli installée par l'utilisateur ne dispose d'un accès sensible.");
-    else
-    {
-        r.ajouter(TypeBloc::DISCRET, "Pas forcément malveillantes : vérifie que chacune a été installée volontairement.");
-        for (const AppSensible& a : s.a_surveiller)
-        {
-            std::string acces;
-            auto ajouter = [&](bool actif, const char* texte)
-            { if (actif) acces += (acces.empty() ? "" : ", ") + std::string(texte); };
-            ajouter(a.accessibilite,  "accessibilité (lit l'écran, agit à la place de l'utilisateur)");
-            ajouter(a.administrateur, "administrateur de l'appareil");
-            ajouter(a.notifications,  "lecture de toutes les notifications");
-            ajouter(a.hors_magasin,   "installée hors magasin d'applis");
-            r.ajouter(TypeBloc::PUCE, nom_et_paquet(a.paquet) + " : " + acces + ".");
-        }
-    }
-
-    r.ajouter(TypeBloc::SECTION, "Réglages de sécurité");
-    ajouter_reglages_securite(r, s);
-
-    r.ajouter(TypeBloc::SECTION, "Applications");
-    r.ajouter(TypeBloc::PUCE, "Bloatwares actifs : " + std::to_string(infos.bloatwares.size()));
-    r.ajouter(TypeBloc::PUCE, "Suppression avancée possible : " + std::to_string(infos.avancees.size()));
-    r.ajouter(TypeBloc::PUCE, "Suppression experte possible : " + std::to_string(infos.expertes.size()));
-    r.ajouter(TypeBloc::PUCE, "Applications problématiques : " + std::to_string(infos.problematiques.size()));
-    r.ajouter(TypeBloc::PUCE, "Applications désactivées : " + std::to_string(infos.desactivees.size()));
-    r.ajouter(TypeBloc::PUCE, "Applications désinstallées pour l'utilisateur : " + std::to_string(infos.desinstallees.size()));
-
-    r.ajouter(TypeBloc::SECTION, "Bases utilisées");
-    const std::string date_base = securite::date_mise_a_jour();
-    r.ajouter(TypeBloc::PUCE, "Indicateurs de compromission (projet MVT) : " + std::to_string(s.indicateurs_verifies) +
-                              (date_base.empty() ? "" : ", mis à jour le " + date_base));
-    r.ajouter(TypeBloc::PUCE, "Liste de debloat UAD-ng : " + std::to_string(uad::nombre()) + " applis connues");
-
-    r.ajouter(TypeBloc::SECTION, "Limites de l'analyse");
-    r.ajouter(TypeBloc::PUCE, "Pas d'accès root : seules les informations lisibles par le débogage ADB sont examinées. "
-                              "Les données privées des applis et une grande partie du système restent hors de portée.");
-    r.ajouter(TypeBloc::PUCE, "Seuls les logiciels espions déjà connus sont détectés (indicateurs publiés par Amnesty "
-                              "International, Echap, Citizen Lab... et rassemblés par MVT). Un logiciel espion récent "
-                              "ou fait sur mesure peut passer inaperçu : « aucun logiciel espion connu détecté » ne "
-                              "prouve pas que le téléphone est sain.");
-    r.ajouter(TypeBloc::PUCE, "Faux positifs possibles dans les accès sensibles : des applis légitimes (gestionnaire de "
-                              "mots de passe, lanceur, montre connectée, outil d'accessibilité) ont besoin de ces accès.");
-    r.ajouter(TypeBloc::PUCE, "Noms de processus venant d'iOS écartés : beaucoup d'indicateurs de processus visent "
-                              "l'iPhone. Quand un nom correspond à un programme du système Android (par exemple "
-                              "gatekeeperd), il est écarté pour éviter une fausse alerte ; un logiciel espion qui "
-                              "prendrait ce nom ne serait pas signalé.");
-    r.ajouter(TypeBloc::PUCE, "Android tronque les noms de processus à 15 caractères : la comparaison porte alors "
-                              "sur le début du nom.");
-    r.ajouter(TypeBloc::PUCE, "Empreintes et certificats vérifiés seulement pour les applis installées par "
-                              "l'utilisateur, pas pour les applis système.");
-    r.ajouter(TypeBloc::PUCE, "Fichiers suspects recherchés seulement dans les dossiers lisibles sans root "
-                              "(stockage partagé, /data/local/tmp).");
-    r.ajouter(TypeBloc::PUCE, "Résultat valable au moment de l'analyse uniquement.");
-    return r;
-}
+#include "usb.h"      // téléphones branchés en USB
 
 // Action demandée par un clic dans une liste
 enum TypeAction { AUCUNE, DESACTIVER, DESINSTALLER, REACTIVER, REINSTALLER, REMPLACER };
@@ -728,12 +95,12 @@ bool petit_bouton(const char* texte, float largeur, bool destructif = false)
     return clic;
 }
 
-// Bouton « Générer un rapport » à droite de l'en-tête du téléphone, centré sur ses deux lignes
-// (nom et version d'Android). `haut_entete` = position Y du début de l'en-tête.
-bool bouton_generer_rapport(float haut_entete)
+// Petit bouton à droite d'un en-tête (titre + ligne discrète), centré sur ses deux lignes :
+// « Générer un rapport » une fois connecté, « Connexion USB » avant.
+// `haut_entete` = position Y du début de l'en-tête.
+bool bouton_entete(const char* texte, float haut_entete)
 {
     const ImVec2 suite = ImGui::GetCursorPos(); // position après l'en-tête, rétablie à la fin
-    const char* texte = "Générer un rapport";
     const ImGuiStyle& s = ImGui::GetStyle();
     const float largeur = ImGui::CalcTextSize(texte).x + s.FramePadding.x * 2.0f;
     const float hauteur_entete = suite.y - s.ItemSpacing.y - haut_entete;
@@ -1150,6 +517,152 @@ void fenetre_rapport(ImFont* police_grasse, const InfosAppareil& infos, ChoixRap
     ImGui::EndPopup();
 }
 
+// Fenêtre « Connexion USB » : liste des téléphones branchés (mise à jour par un thread),
+// l'utilisateur choisit le sien. Renvoie true quand il demande la connexion : `choisi`
+// contient alors le numéro de série, déjà vérifié par AppareilUsb::connectable.
+bool fenetre_usb(ImFont* police_grasse, const ListeUsb& liste, bool liste_prete, std::string& choisi)
+{
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(460, 0));
+    if (!ImGui::BeginPopupModal("Choix USB", nullptr,
+            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
+        return false;
+
+    const ImGuiStyle& style = ImGui::GetStyle();
+    if (police_grasse) ImGui::PushFont(police_grasse);
+    ImGui::TextUnformatted("Connexion USB");
+    if (police_grasse) ImGui::PopFont();
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextDisabled("Branche le téléphone par câble, active « Débogage USB » dans les options "
+                        "pour les développeurs, puis choisis-le.");
+    ImGui::PopTextWrapPos();
+    ImGui::Dummy(ImVec2(0, 2));
+
+    // Le choix doit toujours désigner un appareil prêt de la liste ; s'il n'y en a qu'un, il est choisi d'office
+    const AppareilUsb* selection = nullptr;
+    int prets = 0;
+    const AppareilUsb* seul_pret = nullptr;
+    for (const AppareilUsb& a : liste.appareils)
+    {
+        if (!a.connectable())
+            continue;
+        ++prets;
+        seul_pret = &a;
+        if (a.serie == choisi)
+            selection = &a;
+    }
+    if (!selection)
+        selection = prets == 1 ? seul_pret : nullptr;
+    choisi = selection ? selection->serie : "";
+
+    // --- Liste (deux lignes par appareil : nom, puis numéro de série) ---
+    bool connecter = false;
+    const float hauteur_ligne = ImGui::GetTextLineHeight() * 2.0f + style.FramePadding.y * 2.0f;
+    // Trois lignes si la fenêtre de l'appli est assez haute, sinon ce qui reste (au moins une ligne et demie)
+    const float hauteur_aide = ImGui::GetTextLineHeightWithSpacing() * 4.0f;
+    const float reste = ImGui::GetMainViewport()->Size.y - 40.0f            // marge autour de la fenêtre
+                      - (ImGui::GetCursorPosY() + style.WindowPadding.y)   // titre et description
+                      - hauteur_aide - ImGui::GetTextLineHeightWithSpacing()
+                      - ImGui::GetFrameHeightWithSpacing() - 4.0f - style.ItemSpacing.y * 3.0f;
+    const float hauteur_liste = std::max(hauteur_ligne * 1.5f + style.WindowPadding.y * 2.0f,
+        std::min(reste, hauteur_ligne * 3.0f + style.ItemSpacing.y * 2.0f + style.WindowPadding.y * 2.0f));
+    // Fond de la liste = couleur des champs : la ligne choisie prend l'accent bleu, le survol s'éclaircit
+    ImGui::PushStyleColor(ImGuiCol_ChildBg,       style.Colors[ImGuiCol_FrameBg]);
+    ImGui::PushStyleColor(ImGuiCol_Border,        ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_Header,        ImVec4(0.40f, 0.60f, 0.95f, 0.28f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.29f, 0.29f, 0.31f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderActive,  ImVec4(0.40f, 0.60f, 0.95f, 0.40f));
+    ImGui::BeginChild("##appareils_usb", ImVec2(0, hauteur_liste), ImGuiChildFlags_Borders);
+    if (liste.appareils.empty())
+    {
+        const char* texte = liste_prete ? "Aucun téléphone détecté" : "Recherche des téléphones...";
+        const ImVec2 taille = ImGui::CalcTextSize(texte);
+        const ImVec2 zone = ImGui::GetContentRegionAvail();
+        ImGui::SetCursorPos(ImVec2((ImGui::GetWindowWidth() - taille.x) * 0.5f,
+                                   ImGui::GetCursorPosY() + (zone.y - taille.y) * 0.5f));
+        ImGui::TextDisabled("%s", texte);
+    }
+    for (const AppareilUsb& a : liste.appareils)
+    {
+        const bool pret = a.connectable();
+        ImGui::PushID(a.serie.c_str());
+        ImGui::BeginDisabled(!pret);
+        if (ImGui::Selectable("##appareil", selection == &a, ImGuiSelectableFlags_AllowDoubleClick,
+                              ImVec2(0, hauteur_ligne)))
+        {
+            choisi = a.serie;
+            if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+                connecter = true;
+        }
+        ImGui::EndDisabled();
+
+        // Texte dessiné par-dessus la ligne (sans ajouter d'élément qui déplacerait le curseur)
+        const ImVec2 haut  = ImGui::GetItemRectMin();
+        const ImVec2 bas   = ImGui::GetItemRectMax();
+        const float marge  = style.FramePadding.x;
+        const float y1     = haut.y + style.FramePadding.y;
+        const float y2     = y1 + ImGui::GetTextLineHeight();
+        ImDrawList* dessin = ImGui::GetWindowDrawList();
+        const ImU32 couleur_nom   = ImGui::GetColorU32(pret ? ImGuiCol_Text : ImGuiCol_TextDisabled);
+        const ImU32 couleur_serie = ImGui::GetColorU32(ImGuiCol_TextDisabled);
+        const std::string etat    = usb::etat_court(a);
+        const ImU32 couleur_etat  = ImGui::GetColorU32(pret ? COULEUR_OK : COULEUR_ALERTE);
+        const float largeur_etat  = ImGui::CalcTextSize(etat.c_str()).x;
+        dessin->PushClipRect(haut, ImVec2(bas.x - largeur_etat - marge * 2.0f, bas.y), true);
+        dessin->AddText(ImVec2(haut.x + marge, y1), couleur_nom, a.nom().c_str());
+        dessin->AddText(ImVec2(haut.x + marge, y2), couleur_serie, a.serie.c_str());
+        dessin->PopClipRect();
+        dessin->AddText(ImVec2(bas.x - marge - largeur_etat, haut.y + (hauteur_ligne - ImGui::GetTextLineHeight()) * 0.5f),
+                        couleur_etat, etat.c_str());
+        ImGui::PopID();
+    }
+    ImGui::EndChild();
+    ImGui::PopStyleColor(5);
+
+    // --- Aide : erreur d'adb, conseils pour les appareils pas prêts, ou liste vide ---
+    // Hauteur fixe : la fenêtre ne change pas de taille (et les boutons ne bougent pas sous la souris)
+    // quand la liste se met à jour
+    ImGui::BeginChild("##aide_usb", ImVec2(0, hauteur_aide));
+    ImGui::PushTextWrapPos(0.0f);
+    if (!liste.erreur.empty())
+        ImGui::TextColored(COULEUR_ALERTE, "adb ne répond pas : %s", liste.erreur.c_str());
+    std::vector<std::string> conseils;
+    for (const AppareilUsb& a : liste.appareils)
+    {
+        const std::string c = usb::conseil(a);
+        if (!c.empty() && std::find(conseils.begin(), conseils.end(), c) == conseils.end())
+            conseils.push_back(c);
+    }
+    for (const std::string& c : conseils)
+        ImGui::TextColored(COULEUR_ALERTE, "%s", c.c_str());
+    if (liste_prete && liste.appareils.empty() && liste.erreur.empty())
+        ImGui::TextDisabled("Vérifie que le câble transmet les données (certains ne font que charger) "
+                            "et que le téléphone est déverrouillé.");
+    ImGui::PopTextWrapPos();
+    ImGui::EndChild();
+    ImGui::TextDisabled("La liste se met à jour toute seule.");
+    ImGui::Dummy(ImVec2(0, 4));
+
+    // --- Boutons ---
+    const float l = (ImGui::GetContentRegionAvail().x - style.ItemSpacing.x) * 0.5f;
+    if (petit_bouton("Annuler", l))
+    {
+        choisi.clear();
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    ImGui::BeginDisabled(choisi.empty());
+    if (petit_bouton("Se connecter", l))
+        connecter = true;
+    ImGui::EndDisabled();
+
+    connecter = connecter && !choisi.empty();
+    if (connecter)
+        ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+    return connecter;
+}
+
 bool contient_cle(const std::string& texte, const std::string& cle)
 {
     size_t pos = texte.find(cle);
@@ -1245,18 +758,6 @@ void logo_alternative(const Photo& logo, const char* nom, float taille)
                     ImGui::GetColorU32(ImGuiCol_TextDisabled), lettre);
 }
 
-// Lance une commande "am start ..." sur le téléphone. Renvoie "" si tout va bien, sinon la sortie d'erreur.
-std::string commande_telephone(const std::string& cible, const std::string& commande_shell)
-{
-    const std::string sortie = nettoyer(executer("adb -s " + cible + " shell \"" + commande_shell + "\""));
-    std::clog << "[REMPLACER] " << commande_shell << " -> " << sortie << std::endl;
-    const bool echec = sortie.find("Error")          != std::string::npos ||
-                       sortie.find("Exception")      != std::string::npos ||
-                       sortie.find("No activities")  != std::string::npos ||
-                       sortie.find("monkey aborted") != std::string::npos;
-    return echec ? sortie : "";
-}
-
 int main()
 {
     //Variable de base
@@ -1275,7 +776,8 @@ int main()
     InfosAppareil    infos;         // résultat de detection_info
     std::string      message_erreur;
     std::string      message_action;  // résultat de la dernière action (désactiver, ...)
-    std::string      cible_connectee; // "IP:Port" de l'appareil connecté
+    std::string      cible_connectee; // "IP:Port" (sans fil) ou numéro de série (USB) de l'appareil connecté
+    bool             connexion_usb = false; // l'appareil connecté l'est par câble (protégé par verrou)
     std::thread      travail;
     std::atomic<bool> action_en_cours{false};
     Action           a_confirmer;     // désinstallation en attente de confirmation
@@ -1304,6 +806,80 @@ int main()
                 decouverte_finie = true;
             }
             decouverte_en_cours = false;
+        });
+    };
+
+    // Connexion par câble : la liste des téléphones est relue chaque seconde tant que la fenêtre
+    // « Connexion USB » est ouverte (un téléphone branché ou autorisé apparaît tout seul)
+    std::thread       thread_usb;
+    std::atomic<bool> usb_actif{false};
+    ListeUsb          liste_usb;              // protégé par verrou
+    bool              liste_usb_prete = false; // première lecture faite (protégé par verrou)
+    std::string       usb_choisi;             // numéro de série choisi dans la fenêtre
+
+    auto demarrer_liste_usb = [&]()
+    {
+        usb_actif = false;
+        if (thread_usb.joinable())
+            thread_usb.join();
+        {
+            std::lock_guard<std::mutex> garde(verrou);
+            liste_usb = ListeUsb();
+            liste_usb_prete = false;
+        }
+        usb_choisi.clear();
+        usb_actif = true;
+        thread_usb = std::thread([&]()
+        {
+            while (usb_actif)
+            {
+                ListeUsb liste = usb::lister();
+                if (!usb_actif)
+                    break;
+                {
+                    std::lock_guard<std::mutex> garde(verrou);
+                    liste_usb = std::move(liste);
+                    liste_usb_prete = true;
+                }
+                for (int i = 0; i < 10 && usb_actif; ++i)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        });
+    };
+
+    // Connexion à `cible` dans un thread : adb connect (sans fil seulement), puis analyse
+    auto lancer_connexion = [&](const std::string& cible, bool cable)
+    {
+        if (travail.joinable())
+            travail.join();
+        {
+            std::lock_guard<std::mutex> garde(verrou);
+            message_erreur.clear();
+            cible_connectee = cible;
+            connexion_usb   = cable;
+        }
+        etat = CONNEXION_EN_COURS;
+        travail = std::thread([&, cible, cable]()
+        {
+            std::string erreur;
+            if (cable || connexion_adb(cible, erreur))
+            {
+                InfosAppareil resultat = detection_info(cible);
+                std::lock_guard<std::mutex> garde(verrou);
+                if (resultat.erreur.empty())
+                {
+                    infos = resultat;
+                    etat = CONNECTE;
+                    return;
+                }
+                message_erreur = resultat.erreur;
+            }
+            else
+            {
+                std::lock_guard<std::mutex> garde(verrou);
+                message_erreur = erreur;
+            }
+            etat = DECONNECTE;
         });
     };
 
@@ -1631,20 +1207,22 @@ int main()
             // Copie locale pour ne pas bloquer le thread pendant l'affichage
             InfosAppareil vue;
             std::string   msg_action, cible, msg_maj;
+            bool          par_usb;
             {
                 std::lock_guard<std::mutex> garde(verrou);
                 vue        = infos;
                 msg_action = message_action;
                 cible      = cible_connectee;
                 msg_maj    = message_maj;
+                par_usb    = connexion_usb;
             }
 
             const float haut_entete = ImGui::GetCursorPosY();
             ImGui::SetWindowFontScale(1.35f);
             ImGui::TextUnformatted((vue.fabricant + " " + vue.modele).c_str());
             ImGui::SetWindowFontScale(1.0f);
-            ImGui::TextDisabled("Android %s  ·  %s", vue.version_android.c_str(), cible.c_str());
-            if (bouton_generer_rapport(haut_entete))
+            ImGui::TextDisabled("Android %s  ·  %s", vue.version_android.c_str(), par_usb ? "USB" : cible.c_str());
+            if (bouton_entete("Générer un rapport", haut_entete))
             {
                 choix_rapport.message.clear();
                 choix_rapport.reussi = false;
@@ -1711,7 +1289,8 @@ int main()
             if (ImGui::Button("Se déconnecter", ImVec2(-FLT_MIN, 0)))
             {
                 suivi_actif = false;
-                executer("adb disconnect " + cible);
+                if (!par_usb) // en USB, il suffit de débrancher le câble
+                    executer("adb disconnect " + cible);
                 {
                     std::lock_guard<std::mutex> garde(verrou);
                     message_action.clear();
@@ -1979,6 +1558,7 @@ int main()
         }
         else
         {
+            const float haut_entete = ImGui::GetCursorPosY();
             ImGui::SetWindowFontScale(1.35f);
             ImGui::TextUnformatted("Connexion ADB");
             ImGui::SetWindowFontScale(1.0f);
@@ -1986,16 +1566,43 @@ int main()
             ImGui::TextDisabled("Connecte ton téléphone via le débogage sans fil.");
             ImGui::PopTextWrapPos();
 
+            // Bouton « Connexion USB » à droite de l'en-tête : remplacé par « Générer un rapport »
+            // une fois connecté (même emplacement)
+            ImGui::BeginDisabled(!adb_ok || etat == CONNEXION_EN_COURS || decouverte_en_cours);
+            if (bouton_entete("Connexion USB", haut_entete))
+            {
+                demarrer_liste_usb();
+                ImGui::OpenPopup("Choix USB");
+            }
+            ImGui::EndDisabled();
+            ImGui::SetItemTooltip("Connecte un téléphone branché par câble.");
+            {
+                ListeUsb liste;
+                bool prete;
+                {
+                    std::lock_guard<std::mutex> garde(verrou);
+                    liste = liste_usb;
+                    prete = liste_usb_prete;
+                }
+                if (fenetre_usb(police_grasse, liste, prete, usb_choisi))
+                {
+                    std::clog << "[USB] Connexion à " << usb_choisi << std::endl;
+                    lancer_connexion(usb_choisi, true);
+                }
+                if (usb_actif && !ImGui::IsPopupOpen("Choix USB"))
+                    usb_actif = false; // fenêtre fermée : plus besoin de relire la liste
+            }
+
             ImGui::Dummy(ImVec2(0, 4));
             ImGui::Separator();
             ImGui::Dummy(ImVec2(0, 4));
 
-            // Statut adb : texte discret vert / rouge
-            const ImVec4 couleur_etat = adb_ok ? ImVec4(0.45f, 0.75f, 0.50f, 1.0f)
-                                               : ImVec4(0.85f, 0.45f, 0.45f, 1.0f);
-            ImGui::TextColored(couleur_etat, "%s", adb_ok ? "adb détecté" : "adb introuvable");
+            // Statut adb : affiché seulement en cas de problème
             if (!adb_ok)
+            {
+                ImGui::TextColored(ImVec4(0.85f, 0.45f, 0.45f, 1.0f), "adb introuvable");
                 ImGui::TextDisabled("Installe-le : sudo apt install adb");
+            }
 
             {
                 std::string msg_maj;
@@ -2072,39 +1679,7 @@ int main()
                     message_erreur = "Adresse IP invalide.";
                 }
                 else
-                {
-                    if (travail.joinable())
-                        travail.join();
-                    {
-                        std::lock_guard<std::mutex> garde(verrou);
-                        message_erreur.clear();
-                        cible_connectee = IP_Cible + ":" + std::to_string(Port);
-                    }
-                    etat = CONNEXION_EN_COURS;
-                    const std::string cible = IP_Cible + ":" + std::to_string(Port);
-                    travail = std::thread([&, cible]()
-                    {
-                        std::string erreur;
-                        if (connexion_adb(cible, erreur))
-                        {
-                            InfosAppareil resultat = detection_info(cible);
-                            std::lock_guard<std::mutex> garde(verrou);
-                            if (resultat.erreur.empty())
-                            {
-                                infos = resultat;
-                                etat = CONNECTE;
-                                return;
-                            }
-                            message_erreur = resultat.erreur;
-                        }
-                        else
-                        {
-                            std::lock_guard<std::mutex> garde(verrou);
-                            message_erreur = erreur;
-                        }
-                        etat = DECONNECTE;
-                    });
-                }
+                    lancer_connexion(IP_Cible + ":" + std::to_string(Port), false);
             }
             ImGui::EndDisabled();
 
@@ -2155,6 +1730,9 @@ int main()
     suivi_actif = false;
     if (thread_suivi.joinable())
         thread_suivi.join();
+    usb_actif = false;
+    if (thread_usb.joinable())
+        thread_usb.join();
     if (thread_telephone.joinable())
         thread_telephone.join();
     for (std::thread& t : threads_recherche)

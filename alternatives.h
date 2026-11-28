@@ -17,7 +17,7 @@
 
 struct Alternative
 {
-    const char* nom;         // doit correspondre au nom utilisé dans LISTE_ALTERNATIVES (main.cpp)
+    const char* nom;         // doit correspondre au nom utilisé dans LISTE_ALTERNATIVES (catalogue_apps.cpp)
     const char* paquet;      // paquet Android de l'alternative
     const char* description;
 

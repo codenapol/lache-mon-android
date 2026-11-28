@@ -29,3 +29,4 @@ Thumbs.db
 
 # AppImage générée
 dist/
+tests/test_usb
