@@ -24,10 +24,27 @@ struct ResultatDecouverte
     std::vector<int> ports_ouverts;  // ports ouverts trouvés par le scan (pour le message d'erreur)
 };
 
+// Un service annoncé en mDNS, lu dans « adb mdns services »
+struct ServiceMdns
+{
+    std::string instance; // adb-XXXX-yyyy
+    std::string type;     // _adb-tls-connect._tcp, _adb-tls-pairing._tcp ou _adb._tcp
+    std::string ip;       // IPv4 valide
+    int port = 0;         // 1 à 65535
+};
+
 namespace decouverte
 {
     // Adresse IPv4 écrite en entier (ex. 192.168.1.42)
     bool ipv4_valide(const std::string& ip);
+
+    // Lit la sortie de « adb mdns services » (fonction pure, testable sans adb).
+    // Les lignes mal formées (IP invalide, port non numérique ou hors limites) sont ignorées.
+    std::vector<ServiceMdns> analyser_mdns(const std::string& sortie);
+
+    // Port d'association (« Associer l'appareil avec un code ») annoncé en mDNS par `ip`.
+    // 0 si aucun, ou si plusieurs ports sont annoncés (on ne devine pas). Bloquant.
+    int port_association(const std::string& ip);
 
     // Cherche le port du débogage sans fil sur `ip` (bloquant : à lancer dans un thread)
     ResultatDecouverte trouver_port(const std::string& ip);

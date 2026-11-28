@@ -34,6 +34,7 @@
 
 #include "adb.h"            // adb embarqué, connexion, commandes sur le téléphone
 #include "alternatives.h" // alternatives libres : catalogue, version et logo
+#include "association.h"  // association du PC au téléphone (adb pair)
 #include "analyse.h"        // analyse du téléphone (InfosAppareil, detection_info)
 #include "catalogue_apps.h" // applications connues (nom_de, alternative_de)
 #include "decouverte.h"   // découverte automatique du port du débogage sans fil
@@ -517,6 +518,96 @@ void fenetre_rapport(ImFont* police_grasse, const InfosAppareil& infos, ChoixRap
     ImGui::EndPopup();
 }
 
+// Contenu de la fenêtre « Association » (modifié par le thread de l'interface seulement)
+struct EtatAssociation
+{
+    std::string ip;           // téléphone à associer (adresse vérifiée à l'ouverture)
+    int  port = 0;            // port d'association : annoncé en mDNS, ou saisi à la main
+    bool port_saisi = false;  // saisi à la main : l'annonce mDNS ne l'écrase plus
+    char code[7] = {};        // code à 6 chiffres
+    std::string message;      // erreur de la dernière tentative
+    std::string detail;       // réponse brute d'adb (diagnostic)
+    bool fermer = false;      // association réussie : la fenêtre se ferme
+};
+
+// Fenêtre « Association » : port d'association (trouvé tout seul si le téléphone l'annonce)
+// et code à 6 chiffres. Renvoie true quand l'utilisateur lance l'association avec des valeurs valides.
+bool fenetre_association(ImFont* police_grasse, EtatAssociation& a, bool en_cours)
+{
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(460, 0));
+    if (!ImGui::BeginPopupModal("Association", nullptr,
+            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
+        return false;
+    if (a.fermer)
+    {
+        ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+        return false;
+    }
+
+    if (police_grasse) ImGui::PushFont(police_grasse);
+    ImGui::TextUnformatted("Associer ce PC au téléphone");
+    if (police_grasse) ImGui::PopFont();
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextDisabled("À faire une seule fois. Sur le téléphone : Options pour les développeurs > "
+                        "Débogage sans fil > Associer l'appareil avec un code. Laisse cette fenêtre "
+                        "ouverte sur le téléphone jusqu'à la fin.");
+    ImGui::PopTextWrapPos();
+    ImGui::Dummy(ImVec2(0, 2));
+    ImGui::TextDisabled("Téléphone : %s", a.ip.c_str());
+    ImGui::Dummy(ImVec2(0, 2));
+
+    ImGui::BeginDisabled(en_cours);
+    ImGui::TextDisabled("Port d'association");
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    if (ImGui::InputInt("##port_association", &a.port, 0, 0))
+    {
+        a.port = std::clamp(a.port, 0, 65535);
+        a.port_saisi = true;
+    }
+    if (!a.port_saisi)
+        ImGui::TextDisabled(a.port > 0 ? "Trouvé automatiquement."
+                                       : "Recherche du téléphone... Tu peux aussi recopier le port affiché.");
+    ImGui::TextDisabled("Code d'association (6 chiffres)");
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    const bool entree = ImGui::InputText("##code_association", a.code, sizeof(a.code),
+        ImGuiInputTextFlags_CharsDecimal | ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::EndDisabled();
+
+    if (!a.message.empty())
+    {
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextColored(COULEUR_ALERTE, "%s", a.message.c_str());
+        if (!a.detail.empty())
+            ImGui::TextDisabled("Réponse d'adb : %s", a.detail.c_str());
+        ImGui::PopTextWrapPos();
+    }
+    ImGui::Dummy(ImVec2(0, 4));
+
+    // Pendant l'association (30 s au plus), la fenêtre ne peut pas être fermée : le résultat
+    // arrive toujours fenêtre ouverte
+    const bool pret = !en_cours && a.port >= 1 && a.port <= 65535 && association::code_valide(a.code);
+    const float l = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+    ImGui::BeginDisabled(en_cours);
+    if (petit_bouton("Annuler", l))
+        ImGui::CloseCurrentPopup();
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!pret);
+    bool associer = petit_bouton(en_cours ? "Association..." : "Associer", l);
+    ImGui::EndDisabled();
+
+    associer = (associer || entree) && pret;
+    if (associer)
+    {
+        a.message.clear();
+        a.detail.clear();
+    }
+    ImGui::EndPopup();
+    return associer;
+}
+
 // Fenêtre « Connexion USB » : liste des téléphones branchés (mise à jour par un thread),
 // l'utilisateur choisit le sien. Renvoie true quand il demande la connexion : `choisi`
 // contient alors le numéro de série, déjà vérifié par AppareilUsb::connectable.
@@ -775,6 +866,7 @@ int main()
     std::mutex       verrou;        // protège les variables ci-dessous
     InfosAppareil    infos;         // résultat de detection_info
     std::string      message_erreur;
+    bool             erreur_association = false; // l'échec vient peut-être d'un PC pas encore associé
     std::string      message_action;  // résultat de la dernière action (désactiver, ...)
     std::string      cible_connectee; // "IP:Port" (sans fil) ou numéro de série (USB) de l'appareil connecté
     bool             connexion_usb = false; // l'appareil connecté l'est par câble (protégé par verrou)
@@ -789,11 +881,13 @@ int main()
     bool               decouverte_finie = false; // résultat prêt à lire (protégé par verrou)
     ResultatDecouverte resultat_decouverte;      // protégé par verrou
     std::string        titre_erreur_decouverte, message_erreur_decouverte; // fenêtre d'erreur
+    std::string        ip_connexion_auto; // se connecter à cette IP dès le port trouvé (vide = non)
 
-    auto lancer_decouverte = [&](const std::string& ip)
+    auto lancer_decouverte = [&](const std::string& ip, bool connecter_ensuite = false)
     {
         if (decouverte_en_cours)
             return;
+        ip_connexion_auto = connecter_ensuite ? ip : "";
         if (thread_decouverte.joinable())
             thread_decouverte.join();
         decouverte_en_cours = true;
@@ -847,6 +941,63 @@ int main()
         });
     };
 
+    // Association (adb pair) : le port d'association annoncé en mDNS est relu toutes les 1,5 s
+    // tant que la fenêtre « Association » est ouverte (il change à chaque ouverture sur le téléphone)
+    EtatAssociation     association_ui;
+    std::thread         thread_veille_association;
+    std::atomic<bool>   veille_association{false};
+    int                 port_association_vu = 0;   // protégé par verrou
+    std::thread         thread_association;
+    std::atomic<bool>   association_en_cours{false};
+    bool                association_finie = false; // résultat prêt à lire (protégé par verrou)
+    ResultatAssociation resultat_association;      // protégé par verrou
+
+    auto demarrer_veille_association = [&](const std::string& ip)
+    {
+        veille_association = false;
+        if (thread_veille_association.joinable())
+            thread_veille_association.join();
+        {
+            std::lock_guard<std::mutex> garde(verrou);
+            port_association_vu = 0;
+        }
+        veille_association = true;
+        thread_veille_association = std::thread([&, ip]()
+        {
+            while (veille_association)
+            {
+                const int port = decouverte::port_association(ip);
+                if (!veille_association)
+                    break;
+                {
+                    std::lock_guard<std::mutex> garde(verrou);
+                    port_association_vu = port;
+                }
+                for (int i = 0; i < 15 && veille_association; ++i)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        });
+    };
+
+    auto lancer_association = [&](const std::string& ip, int port, const std::string& code)
+    {
+        if (association_en_cours)
+            return;
+        if (thread_association.joinable())
+            thread_association.join();
+        association_en_cours = true;
+        thread_association = std::thread([&, ip, port, code]()
+        {
+            ResultatAssociation r = association::associer(ip, port, code);
+            {
+                std::lock_guard<std::mutex> garde(verrou);
+                resultat_association = std::move(r);
+                association_finie = true;
+            }
+            association_en_cours = false;
+        });
+    };
+
     // Connexion à `cible` dans un thread : adb connect (sans fil seulement), puis analyse
     auto lancer_connexion = [&](const std::string& cible, bool cable)
     {
@@ -855,6 +1006,7 @@ int main()
         {
             std::lock_guard<std::mutex> garde(verrou);
             message_erreur.clear();
+            erreur_association = false;
             cible_connectee = cible;
             connexion_usb   = cable;
         }
@@ -878,6 +1030,7 @@ int main()
             {
                 std::lock_guard<std::mutex> garde(verrou);
                 message_erreur = erreur;
+                erreur_association = association::cause_possible(erreur); // jamais en USB (cable)
             }
             etat = DECONNECTE;
         });
@@ -1648,21 +1801,32 @@ int main()
             ImGui::EndDisabled();
             ImGui::SetItemTooltip("Trouve le port du débogage sans fil à partir de l'adresse IP.");
 
-            // Résultat de la découverte : port rempli, ou fenêtre d'erreur
+            // Résultat de la découverte : port rempli (et connexion si elle suit une association),
+            // ou fenêtre d'erreur
             {
-                std::lock_guard<std::mutex> garde(verrou);
-                if (decouverte_finie)
+                std::string connecter_a; // lancée hors du verrou : lancer_connexion le prend aussi
                 {
-                    decouverte_finie = false;
-                    if (resultat_decouverte.port > 0)
-                        Port = resultat_decouverte.port;
-                    else
+                    std::lock_guard<std::mutex> garde(verrou);
+                    if (decouverte_finie)
                     {
-                        titre_erreur_decouverte   = "Port introuvable";
-                        message_erreur_decouverte = resultat_decouverte.erreur;
-                        ImGui::OpenPopup("Erreur découverte");
+                        decouverte_finie = false;
+                        if (resultat_decouverte.port > 0)
+                        {
+                            Port = resultat_decouverte.port;
+                            if (!ip_connexion_auto.empty())
+                                connecter_a = ip_connexion_auto + ":" + std::to_string(Port);
+                        }
+                        else
+                        {
+                            titre_erreur_decouverte   = "Port introuvable";
+                            message_erreur_decouverte = resultat_decouverte.erreur;
+                            ImGui::OpenPopup("Erreur découverte");
+                        }
+                        ip_connexion_auto.clear();
                     }
                 }
+                if (!connecter_a.empty())
+                    lancer_connexion(connecter_a, false);
             }
             fenetre_erreur(police_grasse, "Erreur découverte", titre_erreur_decouverte, message_erreur_decouverte);
 
@@ -1683,28 +1847,105 @@ int main()
             }
             ImGui::EndDisabled();
 
-            // Message d'erreur éventuel
+            // Ouvre la fenêtre « Association » pour l'IP saisie (vérifiée d'abord)
+            const bool association_possible = adb_ok && !IP_Cible.empty() && !en_connexion &&
+                                              !decouverte_en_cours && !association_en_cours;
+            auto ouvrir_association = [&]()
             {
-                std::lock_guard<std::mutex> garde(verrou);
-                if (!message_erreur.empty())
+                if (!decouverte::ipv4_valide(IP_Cible))
+                {
+                    titre_erreur_decouverte   = "Adresse IP invalide";
+                    message_erreur_decouverte = "« " + IP_Cible + " » n'est pas une adresse IP valide. "
+                        "Écris l'adresse affichée dans Débogage sans fil, sans le port (exemple : 192.168.1.42).";
+                    ImGui::OpenPopup("Erreur découverte");
+                    return;
+                }
+                association_ui = EtatAssociation();
+                association_ui.ip = IP_Cible;
+                demarrer_veille_association(IP_Cible);
+                ImGui::OpenPopup("Association");
+            };
+
+            // Message d'erreur éventuel, et proposition d'association si c'est peut-être la cause
+            {
+                std::string erreur;
+                bool proposer_association;
+                {
+                    std::lock_guard<std::mutex> garde(verrou);
+                    erreur = message_erreur;
+                    proposer_association = erreur_association;
+                }
+                if (!erreur.empty())
                 {
                     ImGui::PushTextWrapPos(0.0f);
-                    ImGui::TextColored(ImVec4(0.85f, 0.45f, 0.45f, 1.0f), "%s", message_erreur.c_str());
+                    ImGui::TextColored(ImVec4(0.85f, 0.45f, 0.45f, 1.0f), "%s", erreur.c_str());
+                    if (proposer_association && !en_connexion)
+                    {
+                        ImGui::TextDisabled("Première connexion depuis ce PC ? Il doit d'abord être "
+                                            "associé au téléphone.");
+                        ImGui::BeginDisabled(!association_possible);
+                        if (petit_bouton("Associer ce PC##erreur", -FLT_MIN)) // ID distinct du lien du même nom
+                            ouvrir_association();
+                        ImGui::EndDisabled();
+                    }
                     ImGui::PopTextWrapPos();
                 }
             }
 
-            // Lien discret vers le tuto (pas encore fonctionnel), centré sous le bouton
+            // Liens discrets centrés sous le bouton : association, tuto (pas encore fonctionnel)
             ImGui::Dummy(ImVec2(0, 2));
+            const char* texte_association = "Associer ce PC";
             const char* texte_tuto = "Lancer le tuto";
-            const float largeur_tuto = ImGui::CalcTextSize(texte_tuto).x;
-            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (ImGui::GetContentRegionAvail().x - largeur_tuto) * 0.5f);
+            const float ecart_liens = style.ItemSpacing.x * 3.0f;
+            const float largeur_liens = ImGui::CalcTextSize(texte_association).x + ecart_liens +
+                                        ImGui::CalcTextSize(texte_tuto).x;
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (ImGui::GetContentRegionAvail().x - largeur_liens) * 0.5f);
             ImGui::PushStyleColor(ImGuiCol_TextLink, texte_sec);
+            ImGui::BeginDisabled(!association_possible);
+            if (ImGui::TextLink(texte_association))
+                ouvrir_association();
+            ImGui::EndDisabled();
+            ImGui::SetItemTooltip("Première connexion : associe ce PC au téléphone avec un code à 6 chiffres.");
+            ImGui::SameLine(0.0f, ecart_liens);
             if (ImGui::TextLink(texte_tuto))
             {
                 // TODO : lancer le tuto
             }
             ImGui::PopStyleColor();
+
+            // Fenêtre « Association » : port suivi en mDNS (sauf s'il a été saisi), puis résultat d'adb pair
+            {
+                ResultatAssociation r;
+                bool finie = false;
+                {
+                    std::lock_guard<std::mutex> garde(verrou);
+                    if (!association_ui.port_saisi)
+                        association_ui.port = port_association_vu;
+                    if (association_finie)
+                    {
+                        association_finie = false;
+                        finie = true;
+                        r = resultat_association;
+                    }
+                }
+                if (finie && r.reussi)
+                {
+                    // Associé : on retrouve le port de connexion, puis on se connecte tout seul
+                    std::clog << "[ASSOCIATION] recherche du port de connexion de " << association_ui.ip << std::endl;
+                    association_ui.fermer = true;
+                    veille_association = false;
+                    lancer_decouverte(association_ui.ip, true);
+                }
+                else if (finie)
+                {
+                    association_ui.message = r.erreur;
+                    association_ui.detail  = r.detail;
+                }
+                if (fenetre_association(police_grasse, association_ui, association_en_cours))
+                    lancer_association(association_ui.ip, association_ui.port, association_ui.code);
+                if (veille_association && !ImGui::IsPopupOpen("Association"))
+                    veille_association = false; // fenêtre fermée : plus besoin de guetter le téléphone
+            }
         }
         ImGui::EndChild();
         ImGui::PopStyleVar();
@@ -1721,6 +1962,9 @@ int main()
     }
 
     // --- Nettoyage ---
+    // La fenêtre disparaît tout de suite : attendre les threads (jusqu'à 30 s pour un adb pair
+    // bloqué) ne doit pas laisser une fenêtre figée à l'écran
+    SDL_HideWindow(fenetre);
     if (travail.joinable())
         travail.join();
     if (thread_maj.joinable())
@@ -1733,6 +1977,11 @@ int main()
     usb_actif = false;
     if (thread_usb.joinable())
         thread_usb.join();
+    veille_association = false;
+    if (thread_veille_association.joinable())
+        thread_veille_association.join();
+    if (thread_association.joinable())
+        thread_association.join(); // 30 s au plus (délai de adb pair)
     if (thread_telephone.joinable())
         thread_telephone.join();
     for (std::thread& t : threads_recherche)

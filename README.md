@@ -165,11 +165,18 @@ make
 
 1. **Paramètres → À propos du téléphone** → appuie 7 fois sur **Numéro de build** pour activer les options pour les développeurs.
 2. **Paramètres → Système → Options pour les développeurs → Débogage sans fil** → active-le. Le PC et le téléphone doivent être sur le même Wi-Fi.
-3. **Première fois seulement** : apparie le PC. Dans « Débogage sans fil », touche **Associer l'appareil avec un code**, puis lance sur le PC :
+3. **Première fois seulement** : associe le PC au téléphone. Dans le programme, saisis l'adresse IP puis clique sur **Associer ce PC** (sous « Se connecter » ; le bouton est aussi proposé quand une connexion échoue faute d'association). Sur le téléphone, dans « Débogage sans fil », touche **Associer l'appareil avec un code** et garde cette fenêtre ouverte :
+   - le **port d'association** se remplit tout seul quand le téléphone l'annonce sur le réseau (mDNS) ; sinon, recopie-le ;
+   - saisis le **code à 6 chiffres**, puis **Associer** ;
+   - une fois associé, le programme retrouve le port de connexion et se connecte tout seul.
+
+   <details>
+   <summary>En secours : association depuis le terminal</summary>
+
    ```bash
    adb pair IP:PORT_D_ASSOCIATION   # puis saisis le code à 6 chiffres affiché sur le téléphone
    ```
-   Le programme ne gère pas encore cette étape.
+   </details>
 
 ### 2. Se connecter
 
@@ -224,6 +231,7 @@ Si [MVT](https://github.com/mvt-project/mvt) est installé, ses propres indicate
 ├── uad.cpp / .h          # Téléchargement et lecture de la liste UAD-ng
 ├── alternatives.cpp / .h # Alternatives libres : catalogue, version et logo (F-Droid ou éditeur)
 ├── decouverte.cpp / .h   # Découverte automatique du port du débogage sans fil (mDNS, scan, sonde adb)
+├── association.cpp / .h  # Association du PC au téléphone (adb pair, code à 6 chiffres)
 ├── rapport.cpp / .h      # Rapports d'analyse : écriture en PDF (sans bibliothèque) ou en HTML
 ├── json.h                # Mini lecteur JSON sans dépendance
 ├── outils.cpp / .h       # Commandes shell (avec marqueur de fin), téléchargement, chemins de données
@@ -249,7 +257,7 @@ Si [MVT](https://github.com/mvt-project/mvt) est installé, ses propres indicate
 
 - [x] Bouton « Remplacer » (fiche de l'alternative libre, installation via F-Droid)
 - [ ] Tutoriel intégré (lien « Lancer le tuto »)
-- [ ] Appariement ADB (`adb pair`) depuis l'interface
+- [x] Association ADB (`adb pair`) depuis l'interface
 - [ ] Avertissement de sécurité avant la suppression d'un stalkerware détecté
 - [x] Découverte automatique du port du débogage sans fil
 - [x] Rapport d'analyse basique (PDF ou HTML)

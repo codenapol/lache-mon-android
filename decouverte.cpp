@@ -135,26 +135,17 @@ namespace
         return adb;
     }
 
+    const char* const MDNS_CONNEXION   = "_adb-tls-connect._tcp"; // débogage sans fil
+    const char* const MDNS_TCPIP       = "_adb._tcp";             // adb tcpip classique
+    const char* const MDNS_ASSOCIATION = "_adb-tls-pairing._tcp"; // fenêtre « Associer avec un code »
+
     // Ports annoncés en mDNS par le téléphone `ip` (débogage sans fil ou adb tcpip)
     std::set<int> ports_mdns(const std::string& ip)
     {
         std::set<int> ports;
-        // « adb-XXXX-yyyy	_adb-tls-connect._tcp	192.168.1.42:37123 »
-        std::istringstream lignes(executer("adb mdns services"));
-        std::string ligne;
-        while (std::getline(lignes, ligne))
-        {
-            if (ligne.find("_adb-tls-connect._tcp") == std::string::npos &&
-                ligne.find("_adb._tcp") == std::string::npos)
-                continue; // « _adb-tls-pairing._tcp » est le port d'association, pas de connexion
-            const std::string adresse_port = nettoyer(ligne.substr(ligne.find_last_of(" \t") + 1));
-            const size_t deux_points = adresse_port.rfind(':');
-            if (deux_points == std::string::npos || adresse_port.substr(0, deux_points) != ip)
-                continue;
-            const int port = std::atoi(adresse_port.c_str() + deux_points + 1);
-            if (port > 0 && port <= 65535)
-                ports.insert(port);
-        }
+        for (const ServiceMdns& s : decouverte::analyser_mdns(executer("adb mdns services")))
+            if (s.ip == ip && (s.type == MDNS_CONNEXION || s.type == MDNS_TCPIP))
+                ports.insert(s.port); // le port d'association n'est pas un port de connexion
         return ports;
     }
 
@@ -238,6 +229,57 @@ namespace decouverte
         const uint32_t premier_octet = hote >> 24;
         // 0.x.x.x (« ce réseau »), multicast et adresses réservées / diffusion exclus
         return premier_octet != 0 && premier_octet < 224;
+    }
+
+    std::vector<ServiceMdns> analyser_mdns(const std::string& sortie)
+    {
+        // « adb-XXXX-yyyy	_adb-tls-connect._tcp	192.168.1.42:37123 » (après l'en-tête
+        // « List of discovered mdns services », éliminé faute d'adresse valide)
+        std::vector<ServiceMdns> services;
+        std::istringstream lignes(sortie);
+        std::string ligne;
+        while (std::getline(lignes, ligne))
+        {
+            std::istringstream flux(ligne);
+            std::vector<std::string> mots;
+            for (std::string mot; flux >> mot;)
+                mots.push_back(mot);
+            if (mots.size() < 3)
+                continue;
+
+            const std::string& adresse_port = mots.back();
+            const size_t deux_points = adresse_port.rfind(':');
+            if (deux_points == std::string::npos)
+                continue;
+            const std::string ip = adresse_port.substr(0, deux_points);
+            const std::string port_texte = adresse_port.substr(deux_points + 1);
+            if (!ipv4_valide(ip) || port_texte.empty() || port_texte.size() > 5 ||
+                !std::all_of(port_texte.begin(), port_texte.end(),
+                             [](char c) { return c >= '0' && c <= '9'; }))
+                continue;
+            const int port = std::stoi(port_texte); // 5 chiffres au plus : pas de débordement
+            if (port < 1 || port > 65535)
+                continue;
+
+            ServiceMdns s;
+            s.instance = mots[0];
+            s.type = mots[mots.size() - 2];
+            if (!s.type.empty() && s.type.back() == '.')
+                s.type.pop_back(); // « _adb-tls-connect._tcp. » selon la version d'adb
+            s.ip = ip;
+            s.port = port;
+            services.push_back(s);
+        }
+        return services;
+    }
+
+    int port_association(const std::string& ip)
+    {
+        std::set<int> ports;
+        for (const ServiceMdns& s : analyser_mdns(executer("adb mdns services")))
+            if (s.ip == ip && s.type == MDNS_ASSOCIATION)
+                ports.insert(s.port);
+        return ports.size() == 1 ? *ports.begin() : 0;
     }
 
     ResultatDecouverte trouver_port(const std::string& ip)
