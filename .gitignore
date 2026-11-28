@@ -23,12 +23,3 @@ lache_mon_android
 # Système
 .DS_Store
 Thumbs.db
-
-# Paramètres locaux de Claude Code
-.claude/settings.local.json
-
-# AppImage générée
-dist/
-tests/test_usb
-tests/test_association
-tests/test_conseils_espion
